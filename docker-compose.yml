@@ -1,0 +1,37 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: etf_assistant
+      POSTGRES_USER: etf_user
+      POSTGRES_PASSWORD: etf_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U etf_user -d etf_assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://etf_user:etf_password@postgres:5432/etf_assistant
+      APP_ENV: production
+      DEBUG: "false"
+      TELEGRAM_BOT_TOKEN: 8546588292:AAE9kUcVX5e3AmXUoY90jweRg0Yp5TSSgrQ
+      TELEGRAM_CHAT_ID: 768531852
+      API_BASE_URL: http://localhost:8000
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
