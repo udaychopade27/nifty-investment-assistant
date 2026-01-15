@@ -8,6 +8,7 @@ Scheduler is orchestration-only and contains no business logic.
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from app.scheduler.jobs import sync_nse_holidays_job
 
 import pytz
@@ -40,10 +41,17 @@ def start_scheduler() -> BackgroundScheduler:
     # DAILY DECISION JOB (Market close)
     # Mon–Fri @ 4:15 PM IST
     # ------------------------------------------------------------
+    # scheduler.add_job(
+    #     run_daily_decision_job,
+    #     trigger=CronTrigger(day_of_week="mon-fri", hour=16, minute=15),
+    #     id="daily_decision_job",
+    #     replace_existing=True,
+    # )
+
     scheduler.add_job(
         run_daily_decision_job,
-        trigger=CronTrigger(day_of_week="mon-fri", hour=16, minute=15),
-        id="daily_decision_job",
+        trigger=IntervalTrigger(minutes=1),
+        id="run_daily_decision_job",
         replace_existing=True,
     )
 

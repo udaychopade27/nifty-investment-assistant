@@ -13,7 +13,7 @@ from app.scheduler.scheduler import start_scheduler, shutdown_scheduler
 
 # Import API routers (NO business logic)
 from app.api.routes.health import router as health_router
-from app.api.routes.admin import router as admin_router
+# from app.api.routes.admin import router as admin_router
 from app.api.routes.capital import router as capital_router
 from app.api.routes.decision import router as decision_router
 from app.api.routes.execution import router as execution_router
@@ -36,7 +36,7 @@ def create_fastapi_app() -> FastAPI:
     )
 
     app.include_router(health_router)
-    app.include_router(admin_router, prefix="/admin")
+    # app.include_router(admin_router, prefix="/admin")
     app.include_router(capital_router, prefix="/capital")
     app.include_router(decision_router, prefix="/decision")
     app.include_router(execution_router, prefix="/execution")

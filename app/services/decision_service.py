@@ -20,6 +20,9 @@ from app.domain.strategy.volatility import apply_volatility_context
 from app.domain.strategy.governance import get_strategy_version
 from app.services.trading_calendar_service import TradingCalendarService
 from app.services.notification_service import NotificationService
+from app.services.historical_market_data_service import (
+    HistoricalMarketDataService,
+)
 
 
 class DecisionService:
@@ -27,7 +30,6 @@ class DecisionService:
     def run_daily_decision(
         db,
         decision_date: date,
-        nifty_daily_change_pct: float,
         recent_daily_changes=None,
         vix_value=None,
         is_bear_market: bool = False,
@@ -46,6 +48,25 @@ class DecisionService:
             raise ValueError(f"Decision already exists for {decision_date}")
 
         month = decision_date.strftime("%Y-%m")
+
+        # ------------------------------------------------------------
+        # Fetch market data & compute DAILY CHANGE %
+        # ------------------------------------------------------------
+        df = HistoricalMarketDataService.get_index_history(
+            etf_symbol="NIFTYBEES",
+            lookback_days=5,
+        )
+
+        closes = df["close"].tolist()
+        if len(closes) < 2:
+            raise RuntimeError("Insufficient market data to compute daily change")
+
+        prev_close = closes[-2]
+        today_close = closes[-1]
+
+        nifty_daily_change_pct = round(
+            ((today_close - prev_close) / prev_close) * 100, 2
+        )
 
         # ------------------------------------------------------------
         # Monthly config
@@ -76,7 +97,7 @@ class DecisionService:
         remaining_tactical = max(tactical_capital - invested, 0.0)
 
         # ------------------------------------------------------------
-        # FORCED MONTH-END DEPLOYMENT CHECK
+        # FORCED MONTH-END DEPLOYMENT
         # ------------------------------------------------------------
         is_last_trading_day = TradingCalendarService.is_last_trading_day(
             db, decision_date
@@ -88,8 +109,7 @@ class DecisionService:
             suggested_amount = remaining_tactical
             explanation = (
                 "Last NSE trading day of the month. "
-                "Remaining tactical capital deployed mandatorily "
-                "to maintain monthly discipline."
+                "Remaining tactical capital deployed mandatorily."
             )
 
             NotificationService.send_month_end_forced_alert(
@@ -98,7 +118,7 @@ class DecisionService:
 
         else:
             # ------------------------------------------------------------
-            # Normal dip-based decision flow
+            # Normal dip-based decision
             # ------------------------------------------------------------
             decision_input = DecisionInput(
                 decision_date=decision_date,
@@ -138,9 +158,7 @@ class DecisionService:
             if remaining_tactical <= 0:
                 decision_type = "NONE"
                 suggested_amount = 0.0
-                explanation = (
-                    "No tactical capital remaining; no investment suggested."
-                )
+                explanation = "No tactical capital remaining."
             else:
                 decision_type = dip_decision["decision_label"]
                 explanation = dip_decision["explanation"]

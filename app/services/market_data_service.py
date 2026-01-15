@@ -3,7 +3,7 @@ import logging
 from typing import Dict, List
 
 import yfinance as yf
-
+from app.domain.models.market_snapshot import MarketSnapshot
 from app.domain.strategy.etf_universe import is_valid_etf
 from app.services.etf_ticker_registry import get_ticker
 
@@ -80,3 +80,37 @@ class MarketDataService:
             logger.warning("No live prices available for any ETF")
 
         return prices
+
+
+    @staticmethod
+    def get_market_snapshot() -> MarketSnapshot:
+        """
+        Provides a normalized market snapshot for
+        the Daily Decision Engine.
+
+        SAFE DEFAULTS:
+        - No forced investing
+        - No volatility amplification
+        - No bear overrides
+        """
+
+        try:
+            prices = MarketDataService.get_current_prices(["NIFTYBEES"])
+
+            if "NIFTYBEES" not in prices:
+                raise ValueError("NIFTY price unavailable")
+
+            logger.info("📊 Market snapshot fetched using live prices")
+
+            return MarketSnapshot(
+                nifty_daily_change_pct=0.0,     # placeholder until close-to-close calc
+                recent_changes=[],        # placeholder until historical wired
+                vix=None,                 # volatility neutral
+                is_bear_market=False,     # conservative default
+                source="LIVE_PRICE_ONLY",
+            )
+
+        except Exception as exc:
+            logger.warning("Market snapshot unavailable: %s", exc)
+            raise
+
