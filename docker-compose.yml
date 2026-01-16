@@ -23,14 +23,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      TZ: Asia/Kolkata
-      DATABASE_URL: postgresql+psycopg2://etf_user:etf_password@postgres:5432/etf_assistant
-      APP_ENV: production
-      DEBUG: "false"
-      TELEGRAM_BOT_TOKEN: 8316619324:AAFbTcU3W5nlk4chdOdm7oe05h1qZVFYiGE
-      TELEGRAM_CHAT_ID: 768531852
-      API_BASE_URL: http://localhost:8000
+    env_file:
+      - .env
     ports:
       - "8000:8000"
     restart: unless-stopped
