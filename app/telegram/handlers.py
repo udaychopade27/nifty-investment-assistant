@@ -309,35 +309,92 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
-    # ----- Set capital -----
+    # ----------------------------
+    # 1. Monthly Summary Flow
+    # ----------------------------
+    if context.user_data.get(MONTH_FLOW):
+        # Remove flag so next text isn't treated as a month
+        context.user_data.pop(MONTH_FLOW, None)
+        
+        try:
+            # Clean input: ensure "1" becomes "01" for the API
+            month_num = text.zfill(2) 
+            
+            # API Call to /capital/{month_number}
+            resp = api_get(f"/capital/{month_num}")
+            
+            if resp.status_code != 200:
+                await update.message.reply_text(f"❌ No summary found for month: {text}")
+                return
+
+            d = resp.json()
+            
+            # Formatting response based on your specific API keys
+            msg = (
+                f"📊 *Summary: {d['month']}*\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"💰 *Planned:* ₹{d['planned_capital']:.2f}\n"
+                f"🏦 *Base:* ₹{d['base_capital']:.2f} (60%)\n"
+                f"⚡ *Tactical:* ₹{d['tactical_capital']:.2f} (40%)\n"
+                f"✅ *Invested:* ₹{d['invested_till_today']:.2f}\n"
+                f"📉 *Remaining:* ₹{(d['planned_capital'] - d['invested_till_today']):.2f}"
+            )
+            
+            await update.message.reply_text(msg, parse_mode="Markdown")
+
+        except Exception:
+            logger.exception("Monthly summary failed")
+            await update.message.reply_text("❌ Error: Please enter a month number (e.g., 01 to 12).")
+        return
+
+    # ----------------------------
+    # 2. Set Capital Flow
+    # ----------------------------
     if context.user_data.get(SET_CAPITAL_FLOW):
-        context.user_data.clear()
+        context.user_data.pop(SET_CAPITAL_FLOW, None)
         try:
             amount = float(text)
             resp = api_post("/capital/set", {"amount": amount})
-            if resp.status_code != 200:
-                raise ValueError
-            await update.message.reply_text("✅ Monthly capital set.", parse_mode="Markdown")
+
+            if resp.status_code == 200:
+                await update.message.reply_text("✅ *Monthly capital set successfully.*", parse_mode="Markdown")
+            elif resp.status_code == 409:
+                err = resp.json()
+                await update.message.reply_text(f"⚠️ *Capital Already Set*\n\n{err.get('detail', 'Exists for this month.')}", parse_mode="Markdown")
+            elif resp.status_code == 400:
+                err = resp.json()
+                await update.message.reply_text(f"❌ *Invalid Input*\n\n{err.get('detail', 'Invalid amount.')}", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("❌ Unable to set capital due to an unexpected error.")
+
+        except ValueError:
+            await update.message.reply_text("❌ Please enter a valid numeric amount (e.g. 100000).")
         except Exception:
-            await update.message.reply_text("❌ Enter a valid number.", parse_mode="Markdown")
+            logger.exception("Set capital failed")
+            await update.message.reply_text("❌ Internal error while setting capital.")
         return
 
-    # ----- Invest flow -----
+    # ----------------------------
+    # 3. Invest Flow (Base / Tactical)
+    # ----------------------------
     flow = context.user_data.get(INVEST_FLOW)
     invest_type = context.user_data.get(INVEST_TYPE)
 
     if flow is not None and invest_type:
         try:
+            # Step A: Get ETF Symbol
             if "etf" not in flow:
                 flow["etf"] = text
                 await update.message.reply_text("Enter invested amount (₹):")
                 return
 
+            # Step B: Get Amount
             if "amount" not in flow:
                 flow["amount"] = float(text)
                 await update.message.reply_text("Enter execution price:")
                 return
 
+            # Step C: Get Price and Confirm
             flow["price"] = float(text)
 
             payload = {
@@ -348,6 +405,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "capital_type": invest_type,
             }
 
+            # Clear state before final API call
             context.user_data.clear()
             resp = api_post("/execution/confirm", payload)
 
@@ -360,25 +418,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Units: {r['units']:.2f}",
                     parse_mode="Markdown",
                 )
-                return
-
-            if resp.status_code == 409:
+            elif resp.status_code == 409:
                 err = resp.json()
                 await update.message.reply_text(
-                    f"❌ *Execution Blocked*\n\n"
-                    f"{err['detail']}\n\n"
-                    f"ℹ️ Tactical investments require a Daily Decision.\n"
-                    f"Use /today first.",
+                    f"❌ *Execution Blocked*\n\n{err['detail']}\n\n"
+                    f"ℹ️ Tactical investments require a Daily Decision. Use /today first.",
                     parse_mode="Markdown",
                 )
-                return
+            else:
+                await update.message.reply_text("❌ Execution failed.")
 
-            await update.message.reply_text("❌ Execution failed.")
-
+        except ValueError:
+            await update.message.reply_text("❌ Please enter valid numbers for amount and price.")
         except Exception:
             logger.exception("Invest flow failed")
-            await update.message.reply_text("❌ Execution failed.")
-
+            await update.message.reply_text("❌ Internal error during execution.")
+        return
 
 # ----------------------------
 # Misc
@@ -441,7 +496,7 @@ async def crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def month_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[MONTH_FLOW] = True
     await update.message.reply_text(
-        "📊 *Monthly Summary*\n\nEnter month in `YYYY-MM` format:",
+        "📊 *Monthly Summary*\n\nEnter month in `MM` format:",
         parse_mode="Markdown",
     )
 # ----------------------------
