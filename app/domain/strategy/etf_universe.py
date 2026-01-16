@@ -89,3 +89,40 @@ def is_valid_etf(symbol: str) -> bool:
     if not isinstance(symbol, str):
         return False
     return symbol in ETF_UNIVERSE
+
+# # Canonical ETF universe — matches broker symbols exactly
+
+# ETF_UNIVERSE = {
+#     "NIFTYBEES": {
+#         "label": "NIFTY 50",
+#         "broker_symbol": "NIFTYBEES",
+#     },
+#     "JUNIORBEES": {
+#         "label": "NIFTY NEXT 50",
+#         "broker_symbol": "JUNIORBEES",
+#     },
+#     "MIDCAPETF": {
+#         "label": "NIFTY MIDCAP 150",
+#         "broker_symbol": "MIDCAPETF",
+#     },
+#     "LOWVOLIETF": {
+#         "label": "NIFTY LOW VOL",
+#         "broker_symbol": "LOWVOLIETF",
+#     },
+#     "GOLDBEES": {
+#         "label": "GOLD",
+#         "broker_symbol": "GOLDBEES",
+#     },
+#     "BHARATBOND": {
+#         "label": "BHARAT BOND",
+#         "broker_symbol": "BHARATBOND",
+#     },
+# }
+
+
+# def get_all_etfs() -> list[str]:
+#     return list(ETF_UNIVERSE.keys())
+
+
+# def is_valid_etf(symbol: str) -> bool:
+#     return symbol in ETF_UNIVERSE

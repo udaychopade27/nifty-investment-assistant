@@ -28,6 +28,18 @@ INVEST_TYPE = "invest_type"      # BASE / TACTICAL
 MONTH_FLOW = "month_flow"
 SET_CAPITAL_FLOW = "set_capital_flow"
 
+# ----------------------------
+# ETF Selection (UI only)
+# ----------------------------
+
+ETF_BUTTONS = [
+    "NIFTYBEES",
+    "JUNIORBEES",
+    "MIDCAPETF",
+    "LOWVOLIETF",
+    "GOLDBEES",
+    "BHARATBOND",
+]
 
 # ----------------------------
 # Core commands
@@ -213,47 +225,6 @@ async def capital_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ----------------------------
-# Base plan
-# ----------------------------
-
-async def base_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        month_resp = api_get("/capital/months/current")
-        if month_resp.status_code != 200:
-            await update.message.reply_text("❌ Monthly capital not set.")
-            return
-
-        month = month_resp.json()["month"]
-        resp = api_get(f"/capital/base-plan/{month}")
-        if resp.status_code != 200:
-            await update.message.reply_text("❌ Base plan not available.")
-            return
-
-        d = resp.json()
-        lines = [
-            f"📊 *Base Investment Plan — {d['month']}*\n",
-            f"*Total Base Capital:* ₹{d['base_capital']:.2f}\n",
-        ]
-
-        for p in d["base_plan"]:
-            lines.append(
-                f"• *{p['etf']}* → ₹{p['planned_amount']:.2f} "
-                f"({p['allocation_pct']:.0f}%)"
-            )
-
-        lines.append(
-            "\nℹ️ This is your *disciplined base plan*.\n"
-            "💡 Remaining 40% is reserved for dip strategy."
-        )
-
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-    except Exception:
-        logger.exception("Base plan failed")
-        await update.message.reply_text("❌ Unable to load base plan.")
-
-
-# ----------------------------
 # Invest flow (BASE / TACTICAL)
 # ----------------------------
 
@@ -278,13 +249,39 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     await update.callback_query.answer()
 
+    # ----- Invest type selection -----
     if data in ("invest_base", "invest_tactical"):
         context.user_data.clear()
         context.user_data[INVEST_TYPE] = "BASE" if data == "invest_base" else "TACTICAL"
         context.user_data[INVEST_FLOW] = {}
 
+        keyboard = []
+        row = []
+        for etf in ETF_BUTTONS:
+            row.append(
+                InlineKeyboardButton(etf, callback_data=f"invest_etf_{etf}")
+            )
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
         await update.callback_query.message.reply_text(
-            f"*{context.user_data[INVEST_TYPE]} Investment*\n\nEnter ETF symbol:",
+            f"*{context.user_data[INVEST_TYPE]} Investment*\n\n"
+            "Select ETF (or type manually):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+        return
+
+    # ----- ETF selected via button -----
+    if data.startswith("invest_etf_"):
+        etf = data.replace("invest_etf_", "")
+        context.user_data.setdefault(INVEST_FLOW, {})["etf"] = etf
+
+        await update.callback_query.message.reply_text(
+            f"✅ ETF selected: *{etf}*\n\nEnter invested amount (₹):",
             parse_mode="Markdown",
         )
         return
@@ -323,23 +320,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Monthly capital set.", parse_mode="Markdown")
         except Exception:
             await update.message.reply_text("❌ Enter a valid number.", parse_mode="Markdown")
-        return
-
-    # ----- Monthly report -----
-    if context.user_data.get(MONTH_FLOW):
-        context.user_data.clear()
-        resp = api_get(f"/report/monthly/{text}")
-        if resp.status_code == 200:
-            d = resp.json()
-            await update.message.reply_text(
-                f"📊 *Monthly Summary — {d['month']}*\n\n"
-                f"Planned: ₹{d['planned_capital']:.2f}\n"
-                f"Base: ₹{d['capital_split']['base']:.2f}\n"
-                f"Tactical: ₹{d['capital_split']['tactical']:.2f}",
-                parse_mode="Markdown",
-            )
-        else:
-            await update.message.reply_text("❌ Invalid month.")
         return
 
     # ----- Invest flow -----
@@ -464,3 +444,42 @@ async def month_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 *Monthly Summary*\n\nEnter month in `YYYY-MM` format:",
         parse_mode="Markdown",
     )
+# ----------------------------
+# Base plan
+# ----------------------------
+
+async def base_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        month_resp = api_get("/capital/months/current")
+        if month_resp.status_code != 200:
+            await update.message.reply_text("❌ Monthly capital not set.")
+            return
+
+        month = month_resp.json()["month"]
+        resp = api_get(f"/capital/base-plan/{month}")
+        if resp.status_code != 200:
+            await update.message.reply_text("❌ Base plan not available.")
+            return
+
+        d = resp.json()
+        lines = [
+            f"📊 *Base Investment Plan — {d['month']}*\n",
+            f"*Total Base Capital:* ₹{d['base_capital']:.2f}\n",
+        ]
+
+        for p in d["base_plan"]:
+            lines.append(
+                f"• *{p['etf']}* → ₹{p['planned_amount']:.2f} "
+                f"({p['allocation_pct']:.0f}%)"
+            )
+
+        lines.append(
+            "\nℹ️ This is your *disciplined base plan*.\n"
+            "💡 Remaining 40% is reserved for dip strategy."
+        )
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception:
+        logger.exception("Base plan failed")
+        await update.message.reply_text("❌ Unable to load base plan.")
