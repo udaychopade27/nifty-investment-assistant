@@ -25,6 +25,8 @@ services:
         condition: service_healthy
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://etf_user:etf_password@postgres:5432/etf_assistant
     ports:
       - "8000:8000"
     restart: unless-stopped

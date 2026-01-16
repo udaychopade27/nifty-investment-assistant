@@ -60,7 +60,7 @@ def start_scheduler() -> BackgroundScheduler:
     # ------------------------------------------------------------
     scheduler.add_job(
         run_crash_opportunity_job,
-        trigger=CronTrigger(day_of_week="mon-fri", hour=16, minute=20),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=15, minute=20),
         id="crash_opportunity_job",
         replace_existing=True,
     )
@@ -70,7 +70,7 @@ def start_scheduler() -> BackgroundScheduler:
     # ------------------------------------------------------------
     scheduler.add_job(
         run_daily_report_job,
-        trigger=CronTrigger(day_of_week="mon-fri", hour=16, minute=30),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=15, minute=30),
         id="daily_report_job",
         replace_existing=True,
     )
