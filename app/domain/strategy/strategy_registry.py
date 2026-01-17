@@ -1,18 +1,22 @@
 from datetime import datetime
 
-STRATEGIES = {
+STRATEGY_REGISTRY = {
+    "BASE_CORE_V1": {
+        "type": "LONG_TERM",
+        "risk": "MEDIUM",
+        "rebalance": "ANNUAL",
+        "dip_enabled": True,
+    },
     "AGGRESSIVE_GROWTH_V1": {
-        "strategy_id": "AGGRESSIVE_GROWTH_V1",
-        "strategy_type": "LONG_TERM",
-        "risk_class": "HIGH",
-        "rebalance_frequency": "ANNUAL",
-        "dip_deployment_enabled": True,
-        "created_at": datetime.utcnow(),
-    }
+        "type": "LONG_TERM",
+        "risk": "HIGH",
+        "rebalance": "ANNUAL",
+        "dip_enabled": True,
+    },
 }
 
 
 def get_strategy(strategy_id: str) -> dict:
-    if strategy_id not in STRATEGIES:
+    if strategy_id not in STRATEGY_REGISTRY:
         raise ValueError(f"Unknown strategy: {strategy_id}")
-    return STRATEGIES[strategy_id]
+    return STRATEGY_REGISTRY[strategy_id]

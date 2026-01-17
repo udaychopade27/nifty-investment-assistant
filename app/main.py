@@ -19,7 +19,7 @@ from app.api.routes.decision import router as decision_router
 from app.api.routes.execution import router as execution_router
 from app.api.routes.portfolio import router as portfolio_router
 from app.api.routes.report import router as report_router
-
+from app.api.routes.aggressive_strategy import router as aggressive_strategy_router
 # Telegram MUST run in main thread
 from app.telegram.bot import main as telegram_main
 
@@ -42,7 +42,7 @@ def create_fastapi_app() -> FastAPI:
     app.include_router(execution_router, prefix="/execution")
     app.include_router(portfolio_router, prefix="/portfolio")
     app.include_router(report_router, prefix="/report")
-
+    app.include_router(aggressive_strategy_router, prefix="/strategy/aggressive-growth", tags=["Aggressive Strategy"])
     return app
 
 

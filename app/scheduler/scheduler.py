@@ -18,6 +18,9 @@ from app.scheduler.jobs import (
     run_crash_opportunity_job,
     run_daily_report_job,
     run_monthly_report_job,
+    run_aggressive_monthly_sip_job,
+    run_aggressive_dip_job,
+    run_aggressive_annual_rebalance_job,
 )
 
 _logger = logging.getLogger(__name__)
@@ -93,6 +96,26 @@ def start_scheduler() -> BackgroundScheduler:
         sync_nse_holidays_job,
         trigger=CronTrigger(month=1, day=5, hour=10),
         id="sync_nse_holidays_job",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_aggressive_monthly_sip_job,
+        trigger=CronTrigger(day=1, hour=10, minute=0),
+        id="aggressive_monthly_sip",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        run_aggressive_dip_job,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=15, minute=15),
+        id="aggressive_dip_job",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        run_aggressive_annual_rebalance_job,
+        trigger=CronTrigger(month=1, day=1, hour=10, minute=0),
+        id="aggressive_annual_rebalance",
         replace_existing=True,
     )
 

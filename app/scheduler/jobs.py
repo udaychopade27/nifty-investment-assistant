@@ -22,6 +22,8 @@ from app.reports.daily_report import generate_daily_report
 from app.reports.monthly_report import generate_monthly_report
 from app.services.holiday_service import HolidayService
 from app.services.inav_snapshot_service import INAVSnapshotService
+from app.services.aggressive_strategy_service import AggressiveStrategyService
+from app.services.aggressive_rebalance_service import AggressiveRebalanceService
 
 
 _logger = logging.getLogger(__name__)
@@ -169,5 +171,57 @@ def sync_nse_holidays_job():
         HolidayService.sync_nse_holidays(db, year)
     except Exception as exc:
         _logger.error("NSE holiday sync failed safely: %s", exc)
+    finally:
+        db.close()
+        
+def run_aggressive_monthly_sip_job():
+    """
+    Run monthly SIP allocation for Aggressive Growth strategy
+    """
+    _logger.info("🚀 Running Aggressive Growth monthly SIP")
+
+    db = get_db_session()
+    try:
+        AggressiveStrategyService.run_monthly_allocation(
+            db=db,
+            execution_date=date.today(),
+        )
+    except Exception as exc:
+        _logger.warning(f"Aggressive SIP skipped safely: {exc}")
+    finally:
+        db.close()
+
+def run_aggressive_dip_job():
+    """
+    Aggressive dip deployment (separate from Base tactical)
+    """
+    _logger.info("📉 Running Aggressive Growth dip check")
+
+    db = get_db_session()
+    try:
+        AggressiveStrategyService.run_dip_allocation(
+            db=db,
+            decision_date=date.today(),
+        )
+    except Exception as exc:
+        _logger.warning(f"Aggressive dip skipped safely: {exc}")
+    finally:
+        db.close()
+        
+        
+def run_aggressive_annual_rebalance_job():
+    """
+    Annual rebalance for Aggressive Growth strategy
+    """
+    _logger.info("🔄 Running Aggressive Growth annual rebalance")
+
+    db = get_db_session()
+    try:
+        AggressiveRebalanceService.run_annual_rebalance(
+            db=db,
+            as_of_date=date.today(),
+        )
+    except Exception as exc:
+        _logger.warning(f"Aggressive rebalance skipped safely: {exc}")
     finally:
         db.close()
