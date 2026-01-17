@@ -5,6 +5,7 @@ from collections import defaultdict
 
 from app.db.models import ExecutedInvestment
 from app.services.market_data_service import MarketDataService
+from app.services.etf_inav_service import ETFINAVService
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class PortfolioService:
             invested = data["invested"]
             units = data["units"]
             avg_price = invested / units if units > 0 else 0.0
-
+            inav_info = ETFINAVService.get_valuation(etf)
             total_invested += invested
 
             # ---------- Price unavailable ----------
@@ -83,6 +84,10 @@ class PortfolioService:
                         "pnl": None,
                         "pnl_pct": None,
                         "price_status": "UNAVAILABLE",
+                        # 🔽 NEW (SAFE)
+                        "inav": inav_info["inav"],
+                        "inav_gap_pct": inav_info["gap_pct"],
+                        "valuation": inav_info["valuation"],
                     }
                 )
                 continue

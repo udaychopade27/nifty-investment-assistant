@@ -22,6 +22,7 @@ from app.telegram.handlers import (
     rules,
     pnl,
     help_cmd,
+    inav_cmd,
     handle_callbacks,
     handle_text,
 )
@@ -49,6 +50,7 @@ def main():
     application.add_handler(CommandHandler("crash", crash))
     application.add_handler(CommandHandler("alert", crash))
     application.add_handler(CommandHandler("rules", rules))
+    application.add_handler(CommandHandler("inav", inav_cmd))
     application.add_handler(CommandHandler("pnl", pnl))
     application.add_handler(CommandHandler("help", help_cmd))
 

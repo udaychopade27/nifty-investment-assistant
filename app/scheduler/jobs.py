@@ -21,6 +21,8 @@ from app.services.notification_service import NotificationService
 from app.reports.daily_report import generate_daily_report
 from app.reports.monthly_report import generate_monthly_report
 from app.services.holiday_service import HolidayService
+from app.services.inav_snapshot_service import INAVSnapshotService
+
 
 _logger = logging.getLogger(__name__)
 
@@ -145,6 +147,10 @@ def run_monthly_report_job():
         _logger.warning(f"Monthly report job failed safely: {exc}")
     finally:
         db.close()
+        
+def run_inav_snapshot_job():
+    _logger.info("📸 Running daily iNAV snapshot job")
+    INAVSnapshotService.capture_snapshot(date.today())
 
 
 # -------------------------------------------------------------------

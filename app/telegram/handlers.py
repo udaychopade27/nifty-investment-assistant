@@ -3,6 +3,8 @@ import requests
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+from app.services.etf_inav_service import ETFINAVService
+from app.domain.strategy.etf_universe import ETF_UNIVERSE
 
 API_BASE = "http://localhost:8000"
 logger = logging.getLogger(__name__)
@@ -66,6 +68,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Monthly Summary", callback_data="month")],
         [InlineKeyboardButton("💰 Capital Status", callback_data="capital")],
         [InlineKeyboardButton("💸 Confirm Investment", callback_data="invest")],
+        [InlineKeyboardButton("📊 iNAV Valuation", callback_data="inav_menu")],
         [InlineKeyboardButton("⚠️ Crash Advisory", callback_data="crash")],
         [InlineKeyboardButton("📜 Rules", callback_data="rules")],
         [InlineKeyboardButton("❓ Help", callback_data="help")],
@@ -248,6 +251,52 @@ async def invest_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     await update.callback_query.answer()
+    
+        # ---- iNAV menu ----
+    if data == "inav_menu":
+        keyboard = []
+        row = []
+
+        for symbol in ETF_UNIVERSE.keys():
+            row.append(
+                InlineKeyboardButton(
+                    symbol,
+                    callback_data=f"inav_etf:{symbol}"
+                )
+            )
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+
+        if row:
+            keyboard.append(row)
+
+        await update.callback_query.message.reply_text(
+            "📊 *ETF iNAV Lookup*\n\nSelect an ETF:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+        return
+
+    # ---- iNAV ETF selected ----
+    if data.startswith("inav_etf:"):
+        etf = data.split(":", 1)[1]
+        try:
+            info = ETFINAVService.get_valuation(etf)
+
+            await update.callback_query.message.reply_text(
+                f"📊 *ETF Valuation — {etf}*\n\n"
+                f"Market Price: ₹{info['market_price']}\n"
+                f"iNAV: {info['inav'] if info['inav'] else 'Not Available'}\n"
+                f"Gap: {info['gap_pct'] if info['gap_pct'] is not None else '—'}\n"
+                f"Status: *{info['valuation']}*\n\n"
+                f"_ℹ️ Informational only. Not used in decisions._",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            logger.exception("INAV lookup failed")
+            await update.callback_query.message.reply_text("❌ Unable to fetch iNAV.")
+        return
 
     # ----- Invest type selection -----
     if data in ("invest_base", "invest_tactical"):
@@ -451,6 +500,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/pnl – Profit & Loss\n"
         "/month – Monthly summary\n"
         "/invest – Confirm execution\n"
+        "/inav – iNAV valuation\n\n"
         "/crash – Crash advisory\n"
         "/rules – Strategy rules\n\n"
         "⚠️ Investing involves market risk.",
@@ -538,3 +588,32 @@ async def base_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logger.exception("Base plan failed")
         await update.message.reply_text("❌ Unable to load base plan.")
+        
+# ----------------------------
+# /inav COMMAND (UNCHANGED)
+# ----------------------------
+
+async def inav_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: /inav <ETF_SYMBOL>\nExample: /inav NIFTYBEES"
+            )
+            return
+
+        etf = context.args[0].upper()
+        info = ETFINAVService.get_valuation(etf)
+
+        await update.message.reply_text(
+            f"📊 *ETF Valuation — {etf}*\n\n"
+            f"Market Price: ₹{info['market_price']}\n"
+            f"iNAV: ₹{info['inav']}\n"
+            f"Gap: {info['gap_pct']}%\n"
+            f"Status: *{info['valuation']}*\n\n"
+            f"_ℹ️ Informational only. Not used in decisions._",
+            parse_mode="Markdown",
+        )
+
+    except Exception:
+        logger.exception("iNAV command failed")
+        await update.message.reply_text("❌ Unable to fetch iNAV.")
