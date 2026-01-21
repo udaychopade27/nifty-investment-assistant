@@ -126,3 +126,22 @@ class TradingHoliday(Base):
     __table_args__ = (
         Index("ix_trading_holidays_year", "year"),
     )
+    
+class DailyDecisionETF(Base):
+    __tablename__ = "daily_decision_etf"
+
+    id = Column(Integer, primary_key=True)
+
+    decision_date = Column(Date, nullable=False)
+    etf_symbol = Column(String, nullable=False)
+    index_name = Column(String, nullable=False)
+
+    units_planned = Column(Integer, nullable=False)
+    planned_amount = Column(Float, nullable=False)
+
+    status = Column(String, nullable=False)  # PLANNED / SKIPPED
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("decision_date", "etf_symbol", name="uq_decision_etf"),
+    )
