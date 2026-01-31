@@ -5,137 +5,68 @@ services:
   db:
     image: postgres:15-alpine
     container_name: etf_db
-    restart: unless-stopped
     environment:
-      POSTGRES_DB: ${DB_NAME:-etf_assistant}
-      POSTGRES_USER: ${DB_USER:-etf_user}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-etf_password}
+      POSTGRES_USER: etf_user
+      POSTGRES_PASSWORD: etf_password
+      POSTGRES_DB: etf_assistant
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "5432:5432"
+    networks:
+      - etf_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-etf_user} -d ${DB_NAME:-etf_assistant}"]
+      test: ["CMD-SHELL", "pg_isready -U etf_user"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - etf_network
 
-  # FastAPI Application
+  # Unified Application (API + Scheduler + Telegram)
   app:
-    build:
+    build: 
       context: .
       dockerfile: docker/Dockerfile
+
     container_name: etf_app
-    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://${DB_USER:-etf_user}:${DB_PASSWORD:-etf_password}@db:5432/${DB_NAME:-etf_assistant}
-      - APP_ENV=${APP_ENV:-development}
-      - DEBUG=${DEBUG:-True}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      DATABASE_URL: postgresql+asyncpg://etf_user:etf_password@db:5432/etf_assistant
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      DEBUG: "False"
+      LOG_LEVEL: INFO
+      TIMEZONE: Asia/Kolkata
+      PRICE_BUFFER_PERCENT: 2.0
+      MIN_INVESTMENT_AMOUNT: 100.00
+      
+      # Telegram Settings
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-True}
+      
+      # Scheduler Settings
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-True}
+      DAILY_DECISION_TIME: "10:00"
+      MONTHLY_SUMMARY_TIME: "18:00"
+      
     volumes:
-      - ./app:/app/app
       - ./config:/app/config
-      - ./logs:/app/logs
-      - ./tests:/app/tests
-    ports:
-      - "${API_PORT:-8000}:8000"
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    networks:
-      - etf_network
-
-  # Telegram Bot (separate service for clarity)
-  telegram_bot:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    container_name: etf_telegram_bot
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-      app:
-        condition: service_started
-    environment:
-      - DATABASE_URL=postgresql://${DB_USER:-etf_user}:${DB_PASSWORD:-etf_password}@db:5432/${DB_NAME:-etf_assistant}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-True}
-    volumes:
       - ./app:/app/app
-      - ./config:/app/config
-      - ./logs:/app/logs
-    command: python -m app.telegram.bot
-    networks:
-      - etf_network
-
-  # Scheduler (separate service for daily/monthly jobs)
-  scheduler:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    container_name: etf_scheduler
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgresql://${DB_USER:-etf_user}:${DB_PASSWORD:-etf_password}@db:5432/${DB_NAME:-etf_assistant}
-      - SCHEDULER_ENABLED=${SCHEDULER_ENABLED:-True}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-    volumes:
-      - ./app:/app/app
-      - ./config:/app/config
-      - ./logs:/app/logs
-    command: python -m app.scheduler.main
-    networks:
-      - etf_network
-
-  # Optional: Redis for caching
-  redis:
-    image: redis:7-alpine
-    container_name: etf_redis
-    restart: unless-stopped
     ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+      - "8000:8000"
     networks:
       - etf_network
-    profiles:
-      - with-redis
-
-  # Optional: pgAdmin for database management
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: etf_pgadmin
     restart: unless-stopped
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@etf.local
-      PGADMIN_DEFAULT_PASSWORD: admin
-    ports:
-      - "5050:80"
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-    networks:
-      - etf_network
-    profiles:
-      - with-pgadmin
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   postgres_data:
-    driver: local
-  redis_data:
-    driver: local
-  pgadmin_data:
-    driver: local
 
 networks:
   etf_network:

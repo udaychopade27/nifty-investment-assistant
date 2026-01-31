@@ -1,11 +1,11 @@
 #!/bin/bash
-# Quickstart Script for ETF Assistant
-# Run this to get the system up and running quickly
+# Quickstart Script for ETF Assistant - Unified Version
+# Runs API + Scheduler + Telegram in one container
 
 set -e  # Exit on error
 
-echo "🚀 ETF Assistant Quickstart"
-echo "================================"
+echo "🚀 ETF Assistant Unified Quickstart"
+echo "===================================="
 echo ""
 
 # Check if Docker is running
@@ -33,12 +33,12 @@ echo "🐳 Building Docker containers..."
 docker-compose build
 
 echo ""
-echo "🚀 Starting services..."
+echo "🚀 Starting unified service (API + Scheduler + Telegram)..."
 docker-compose up -d
 
 echo ""
-echo "⏳ Waiting for database to be ready..."
-sleep 10
+echo "⏳ Waiting for services to be ready..."
+sleep 15
 
 # Run database migrations
 echo "📊 Running database migrations..."
@@ -59,18 +59,25 @@ echo "📍 Access points:"
 echo "   - API Documentation: http://localhost:8000/docs"
 echo "   - API Root: http://localhost:8000"
 echo "   - Health Check: http://localhost:8000/health"
-echo "   - pgAdmin (optional): http://localhost:5050"
+echo "   - Services Status: http://localhost:8000/services/status"
+echo ""
+echo "🎯 Running Services:"
+echo "   ✅ API Server (FastAPI)"
+echo "   ✅ Scheduler (Daily decisions at 10 AM)"
+echo "   ✅ Telegram Bot (if token configured)"
+echo "   ✅ PostgreSQL Database"
 echo ""
 echo "📖 Next steps:"
-echo "   1. Set your monthly capital: Use Telegram bot or API"
-echo "   2. System will generate daily decisions at 10:00 AM"
-echo "   3. Review decisions and execute trades manually"
+echo "   1. Set your monthly capital: POST /api/v1/capital/set"
+echo "   2. Configure Telegram token in .env (if not done)"
+echo "   3. Send /start to your Telegram bot"
+echo "   4. System will generate daily decisions at 10:00 AM"
 echo ""
 echo "🔧 Useful commands:"
-echo "   - View logs: docker-compose logs -f"
+echo "   - View logs: docker-compose logs -f app"
 echo "   - Stop system: docker-compose down"
-echo "   - Restart: docker-compose restart"
+echo "   - Restart: docker-compose restart app"
 echo "   - Shell access: docker-compose exec app bash"
 echo ""
-echo "📚 Read README.md for complete documentation"
-echo ""
+echo "📚 Read FINAL_FIXES.md for complete documentation"
+echo ""echo "🚀 Enjoy using ETF Assistant!"
