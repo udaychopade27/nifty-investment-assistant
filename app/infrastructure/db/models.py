@@ -1,0 +1,222 @@
+"""
+Database Models (SQLAlchemy ORM)
+Insert-only audit tables - NO DELETES
+"""
+
+from sqlalchemy import (
+    Column, Integer, String, Numeric, Date, DateTime, 
+    Boolean, ForeignKey, Text, Enum as SQLEnum, Index
+)
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from datetime import datetime
+import enum
+
+from app.infrastructure.db.database import Base
+
+
+# Enums
+class DecisionTypeEnum(str, enum.Enum):
+    NONE = "NONE"
+    SMALL = "SMALL"
+    MEDIUM = "MEDIUM"
+    FULL = "FULL"
+
+
+class ETFStatusEnum(str, enum.Enum):
+    PLANNED = "PLANNED"
+    SKIPPED = "SKIPPED"
+    EXECUTED = "EXECUTED"
+    REJECTED = "REJECTED"
+
+
+class CrashSeverityEnum(str, enum.Enum):
+    MILD = "MILD"
+    HIGH = "HIGH"
+    EXTREME = "EXTREME"
+
+
+# Tables
+
+class MonthlyConfigModel(Base):
+    """Monthly capital configuration"""
+    __tablename__ = "monthly_config"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(Date, nullable=False, unique=True, index=True)
+    monthly_capital = Column(Numeric(12, 2), nullable=False)
+    base_capital = Column(Numeric(12, 2), nullable=False)
+    tactical_capital = Column(Numeric(12, 2), nullable=False)
+    trading_days = Column(Integer, nullable=False)
+    daily_tranche = Column(Numeric(12, 2), nullable=False)
+    strategy_version = Column(String(50), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    # Relationships
+    daily_decisions = relationship("DailyDecisionModel", back_populates="monthly_config")
+
+
+class DailyDecisionModel(Base):
+    """Daily investment decision"""
+    __tablename__ = "daily_decision"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False, unique=True, index=True)
+    monthly_config_id = Column(Integer, ForeignKey("monthly_config.id"), nullable=False)
+    
+    decision_type = Column(SQLEnum(DecisionTypeEnum), nullable=False)
+    nifty_change_pct = Column(Numeric(6, 2), nullable=False)
+    
+    suggested_total_amount = Column(Numeric(12, 2), nullable=False)
+    actual_investable_amount = Column(Numeric(12, 2), nullable=False)
+    unused_amount = Column(Numeric(12, 2), nullable=False)
+    
+    remaining_base_capital = Column(Numeric(12, 2), nullable=False)
+    remaining_tactical_capital = Column(Numeric(12, 2), nullable=False)
+    
+    explanation = Column(Text, nullable=False)
+    strategy_version = Column(String(50), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    # Relationships
+    monthly_config = relationship("MonthlyConfigModel", back_populates="daily_decisions")
+    etf_decisions = relationship("ETFDecisionModel", back_populates="daily_decision")
+
+
+class ETFDecisionModel(Base):
+    """ETF-specific decision"""
+    __tablename__ = "etf_decision"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    daily_decision_id = Column(Integer, ForeignKey("daily_decision.id"), nullable=False)
+    etf_symbol = Column(String(20), nullable=False, index=True)
+    
+    ltp = Column(Numeric(10, 2), nullable=False)
+    effective_price = Column(Numeric(10, 2), nullable=False)
+    units = Column(Integer, nullable=False)
+    actual_amount = Column(Numeric(12, 2), nullable=False)
+    
+    status = Column(SQLEnum(ETFStatusEnum), nullable=False)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    # Relationships
+    daily_decision = relationship("DailyDecisionModel", back_populates="etf_decisions")
+    executed_investment = relationship("ExecutedInvestmentModel", back_populates="etf_decision", uselist=False)
+    
+    # Indexes
+    __table_args__ = (
+        Index('ix_etf_decision_lookup', 'daily_decision_id', 'etf_symbol'),
+    )
+
+
+class ExecutedInvestmentModel(Base):
+    """Actual investment execution - AUDIT RECORD"""
+    __tablename__ = "executed_investment"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    etf_decision_id = Column(Integer, ForeignKey("etf_decision.id"), nullable=False, unique=True)
+    etf_symbol = Column(String(20), nullable=False, index=True)
+    
+    units = Column(Integer, nullable=False)
+    executed_price = Column(Numeric(10, 2), nullable=False)
+    total_amount = Column(Numeric(12, 2), nullable=False)
+    slippage_pct = Column(Numeric(6, 2), nullable=False)
+    
+    capital_bucket = Column(String(20), nullable=False)  # base, tactical, extra
+    
+    executed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    execution_notes = Column(Text, nullable=True)
+    
+    # Relationships
+    etf_decision = relationship("ETFDecisionModel", back_populates="executed_investment")
+    
+    # Indexes
+    __table_args__ = (
+        Index('ix_executed_investment_date', 'executed_at'),
+        Index('ix_executed_investment_etf', 'etf_symbol', 'executed_at'),
+    )
+
+
+class ExtraCapitalInjectionModel(Base):
+    """Extra capital injections (crash opportunities)"""
+    __tablename__ = "extra_capital_injection"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(Date, nullable=False, index=True)
+    amount = Column(Numeric(12, 2), nullable=False)
+    reason = Column(Text, nullable=False)
+    injected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CrashOpportunitySignalModel(Base):
+    """Crash opportunity advisory signals"""
+    __tablename__ = "crash_opportunity_signal"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False, index=True)
+    triggered = Column(Boolean, nullable=False)
+    severity = Column(SQLEnum(CrashSeverityEnum), nullable=True)
+    
+    suggested_extra_amount = Column(Numeric(12, 2), nullable=False)
+    explanation = Column(Text, nullable=False)
+    
+    nifty_fall_pct = Column(Numeric(6, 2), nullable=False)
+    three_day_fall_pct = Column(Numeric(6, 2), nullable=False)
+    vix_level = Column(Numeric(6, 2), nullable=True)
+    
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class MonthlySummaryModel(Base):
+    """Monthly rollup summary"""
+    __tablename__ = "monthly_summary"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(Date, nullable=False, unique=True, index=True)
+    
+    total_invested = Column(Numeric(12, 2), nullable=False)
+    base_deployed = Column(Numeric(12, 2), nullable=False)
+    tactical_deployed = Column(Numeric(12, 2), nullable=False)
+    extra_deployed = Column(Numeric(12, 2), nullable=False)
+    
+    unused_base = Column(Numeric(12, 2), nullable=False)
+    unused_tactical = Column(Numeric(12, 2), nullable=False)
+    tactical_carried_forward = Column(Numeric(12, 2), nullable=False)
+    
+    investment_days = Column(Integer, nullable=False)
+    total_units_purchased = Column(Integer, nullable=False)
+    
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class TradingHolidayModel(Base):
+    """NSE trading holidays"""
+    __tablename__ = "trading_holiday"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False, unique=True, index=True)
+    description = Column(String(200), nullable=False)
+    year = Column(Integer, nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class MarketDataCacheModel(Base):
+    """Market data cache (optional)"""
+    __tablename__ = "market_data_cache"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    date = Column(Date, nullable=False, index=True)
+    
+    open_price = Column(Numeric(10, 2), nullable=True)
+    high_price = Column(Numeric(10, 2), nullable=True)
+    low_price = Column(Numeric(10, 2), nullable=True)
+    close_price = Column(Numeric(10, 2), nullable=False)
+    volume = Column(Integer, nullable=True)
+    
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('ix_market_data_unique', 'symbol', 'date', unique=True),
+    )

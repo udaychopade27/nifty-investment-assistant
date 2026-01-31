@@ -1,0 +1,82 @@
+---
+# ETF Universe Configuration
+# Defines all ETFs available for investment
+
+etfs:
+  - symbol: NIFTYBEES
+    name: Nippon India ETF Nifty BeES
+    category: large_cap
+    asset_class: equity
+    description: Tracks Nifty 50 index
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: medium
+    expense_ratio: 0.05
+
+  - symbol: JUNIORBEES
+    name: Nippon India ETF Junior BeES
+    category: growth
+    asset_class: equity
+    description: Tracks Nifty Next 50 index
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: medium_high
+    expense_ratio: 0.28
+
+  - symbol: LOWVOLIETF
+    name: ICICI Prudential Nifty Low Vol 30 ETF
+    category: defensive
+    asset_class: equity
+    description: Low volatility strategy
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: low_medium
+    expense_ratio: 0.25
+
+  - symbol: BHARATBOND
+    name: Bharat Bond ETF April 2031
+    category: debt
+    asset_class: debt
+    description: Government-backed bond ETF
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: low
+    expense_ratio: 0.0005
+
+  - symbol: GOLDBEES
+    name: Nippon India ETF Gold BeES
+    category: commodity
+    asset_class: gold
+    description: Tracks domestic gold prices
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: medium
+    expense_ratio: 1.00
+
+  - symbol: MIDCAPETF
+    name: ICICI Prudential Nifty Midcap 150 ETF
+    category: growth
+    asset_class: equity
+    description: Mid-cap index tracking
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: high
+    expense_ratio: 0.25
+
+# ETF Metadata
+metadata:
+  version: "1.0"
+  last_updated: "2025-01-29"
+  total_etfs: 6
+  
+# Exchange Settings
+exchange_settings:
+  primary_exchange: NSE
+  trading_currency: INR
+  settlement_cycle: T+2

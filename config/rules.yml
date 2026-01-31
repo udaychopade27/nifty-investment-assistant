@@ -1,0 +1,119 @@
+---
+# Investment Rules Configuration
+# Defines decision thresholds and risk constraints
+
+# Capital Split Rules
+capital_rules:
+  base_percentage: 60.0          # Systematic investing
+  tactical_percentage: 40.0      # Dip deployment
+  tactical_carry_forward_cap: 150.0  # Max 1.5x monthly capital
+  min_monthly_capital: 1000.0    # Minimum ₹1,000
+  max_monthly_capital: 1000000.0 # Maximum ₹10,00,000
+
+# Dip Detection Thresholds
+dip_thresholds:
+  none:
+    min_change: -1.0             # No dip above -1%
+    tactical_deployment: 0.0
+  
+  small:
+    min_change: -2.0             # Small dip: -1% to -2%
+    max_change: -1.0
+    tactical_deployment: 25.0    # Deploy 25% tactical
+  
+  medium:
+    min_change: -3.0             # Medium dip: -2% to -3%
+    max_change: -2.0
+    tactical_deployment: 50.0    # Deploy 50% tactical
+  
+  full:
+    max_change: -3.0             # Full dip: below -3%
+    tactical_deployment: 100.0   # Deploy 100% tactical
+
+# Multi-Day Trend Rules
+trend_rules:
+  three_day_threshold: 2.5       # 3-day fall ≥ 2.5% = MEDIUM override
+  five_day_threshold: 4.0        # 5-day fall ≥ 4.0% = FULL override
+  consecutive_red_days: 3        # 3 red days in row = attention
+
+# Crash Opportunity Detection
+crash_detection:
+  mild:
+    nifty_fall: -3.0
+    three_day_fall: -4.0
+    vix_level: 20.0
+    suggested_extra: 10.0        # 10% of monthly capital
+  
+  high:
+    nifty_fall: -5.0
+    three_day_fall: -6.0
+    vix_level: 25.0
+    suggested_extra: 20.0        # 20% of monthly capital
+  
+  extreme:
+    nifty_fall: -7.0
+    three_day_fall: -10.0
+    vix_level: 30.0
+    suggested_extra: 30.0        # 30% of monthly capital
+
+# Price Buffer & Slippage
+price_rules:
+  price_buffer_percent: 2.0      # Add 2% to LTP for safety
+  max_slippage_percent: 3.0      # Reject if slippage > 3%
+  min_unit_value: 100.0          # Skip if 1 unit < ₹100
+  max_single_investment: 100000.0 # ₹1,00,000 per ETF per day
+
+# Unit Calculation Rules
+unit_rules:
+  fractional_units_allowed: false
+  rounding_method: "floor"       # Always floor(), never ceiling
+  min_units: 1                   # Must buy at least 1 unit
+  redistribution_allowed: false  # Never redistribute unused capital
+
+# Risk Constraints
+risk_constraints:
+  max_equity_allocation: 75.0    # Max 75% in equity
+  max_single_etf: 45.0           # Max 45% in one ETF
+  max_midcap: 10.0               # Max 10% in mid-cap
+  min_debt: 10.0                 # Min 10% in debt
+  max_gold: 15.0                 # Max 15% in gold
+
+# Trading Calendar Rules
+calendar_rules:
+  market_open_hour: 9
+  market_open_minute: 15
+  market_close_hour: 15
+  market_close_minute: 30
+  decision_run_hour: 10          # Run decision at 10:00 AM
+  decision_run_minute: 0
+  weekend_trading: false
+  holiday_trading: false
+
+# Execution Validation
+execution_rules:
+  require_daily_decision: true   # Must have decision to invest
+  max_units_variance: 0          # Executed units ≤ planned units
+  price_tolerance_percent: 3.0   # Accept ±3% price variance
+  same_day_execution_only: false # Allow execution next day
+
+# Monthly Rollover Rules
+rollover_rules:
+  unused_base_handling: "reset"  # Base resets each month
+  unused_tactical_handling: "carry_forward"  # Tactical carries forward
+  carry_forward_cap_months: 1.5  # Max 1.5 months tactical
+  auto_create_next_month: true   # Auto-create next month config
+
+# Strategy Metadata
+strategy:
+  version: "2025-Q1"
+  type: "balanced_dip_buying"
+  rebalance_frequency: "monthly"
+  review_frequency: "quarterly"
+  
+# Safety & Audit
+safety:
+  require_human_confirmation: true
+  allow_auto_execution: false
+  enable_audit_logging: true
+  preserve_all_decisions: true
+  no_delete_policy: true

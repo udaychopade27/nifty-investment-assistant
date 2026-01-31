@@ -1,0 +1,185 @@
+---
+# Application Configuration
+# System-wide settings and parameters
+
+# Application Info
+app:
+  name: "Indian ETF Investing Assistant"
+  version: "1.0.0"
+  environment: "development"  # development, staging, production
+  timezone: "Asia/Kolkata"
+  currency: "INR"
+
+# Database Configuration
+database:
+  pool_size: 10
+  max_overflow: 20
+  pool_timeout: 30
+  pool_recycle: 3600
+  echo_sql: false  # Set true for SQL debugging
+
+# API Configuration
+api:
+  title: "ETF Assistant API"
+  description: "Production-grade Indian ETF investing assistant"
+  version: "1.0.0"
+  host: "0.0.0.0"
+  port: 8000
+  reload: true  # Auto-reload in development
+  workers: 1    # Increase in production
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8000"
+  cors_allow_credentials: true
+  cors_allow_methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "DELETE"
+  cors_allow_headers:
+    - "*"
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "json"  # json, text
+  file: "logs/app.log"
+  max_bytes: 10485760  # 10 MB
+  backup_count: 5
+  log_sql: false
+  log_market_data: true
+  log_decisions: true
+
+# Market Data Configuration
+market_data:
+  provider: "yfinance"  # yfinance, nsepy, manual
+  cache_enabled: true
+  cache_ttl: 300  # 5 minutes
+  retry_attempts: 3
+  retry_delay: 5  # seconds
+  timeout: 30  # seconds
+  
+  # NSE Symbol Mapping
+  symbol_mapping:
+    NIFTYBEES: "NIFTYBEES.NS"
+    JUNIORBEES: "JUNIORBEES.NS"
+    LOWVOLIETF: "LOWVOLIETF.NS"
+    BHARATBOND: "BHARATBOND.NS"
+    GOLDBEES: "GOLDBEES.NS"
+    MIDCAPETF: "MIDCAPETF.NS"
+  
+  # Index tracking
+  index_symbols:
+    NIFTY50: "^NSEI"
+    NIFTY_NEXT50: "^NSMIDCP"
+    INDIA_VIX: "^INDIAVIX"
+
+# Scheduler Configuration
+scheduler:
+  enabled: true
+  timezone: "Asia/Kolkata"
+  
+  jobs:
+    daily_decision:
+      enabled: true
+      cron: "0 10 * * 1-5"  # 10:00 AM, Mon-Fri
+      max_instances: 1
+      coalesce: true
+    
+    monthly_plan:
+      enabled: true
+      cron: "0 9 1 * *"  # 9:00 AM, 1st of month
+      max_instances: 1
+      coalesce: true
+    
+    monthly_summary:
+      enabled: true
+      cron: "0 18 L * *"  # 6:00 PM, last day of month
+      max_instances: 1
+      coalesce: true
+
+# Telegram Configuration
+telegram:
+  enabled: true
+  polling_interval: 1.0  # seconds
+  timeout: 30
+  retry_attempts: 3
+  
+  # Message formatting
+  parse_mode: "HTML"
+  disable_web_page_preview: true
+  
+  # Notifications
+  notify_on_decision: true
+  notify_on_execution: true
+  notify_on_error: false  # Don't spam errors
+  
+  # Rate limiting
+  max_messages_per_minute: 20
+
+# Cache Configuration (Redis)
+cache:
+  enabled: false  # Enable if using Redis
+  backend: "redis"
+  host: "redis"
+  port: 6379
+  db: 0
+  password: null
+  ttl: 300  # Default TTL in seconds
+  
+  # Cache keys
+  prefixes:
+    market_data: "md:"
+    decisions: "dec:"
+    portfolio: "pf:"
+
+# Monitoring & Health
+monitoring:
+  health_check_enabled: true
+  metrics_enabled: false
+  sentry_enabled: false
+  
+  health_endpoints:
+    - "/health"
+    - "/health/db"
+    - "/health/market"
+
+# Security
+security:
+  secret_key_min_length: 32
+  token_expiry: 86400  # 24 hours
+  max_login_attempts: 5
+  lockout_duration: 900  # 15 minutes
+
+# Feature Flags
+features:
+  web_dashboard: false
+  api_authentication: false
+  portfolio_rebalancing: false
+  advanced_analytics: false
+  export_reports: true
+
+# Testing Configuration
+testing:
+  test_mode: false
+  mock_market_data: false
+  mock_telegram: false
+  use_test_db: false
+  
+  # Test data
+  default_monthly_capital: 50000
+  default_nifty_price: 22000
+  default_test_date: "2025-01-29"
+
+# Maintenance
+maintenance:
+  backup_enabled: true
+  backup_schedule: "0 2 * * *"  # 2:00 AM daily
+  backup_retention_days: 30
+  vacuum_schedule: "0 3 * * 0"  # 3:00 AM Sunday
+
+# Metadata
+metadata:
+  created_date: "2025-01-29"
+  last_updated: "2025-01-29"
+  config_version: "1.0"

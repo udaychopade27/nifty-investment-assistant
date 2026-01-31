@@ -1,0 +1,76 @@
+---
+# Allocation Configuration
+# Defines how capital is distributed across ETFs
+
+# Base Allocation (60% of monthly capital)
+# Used for gradual, systematic investing
+base_allocation:
+  NIFTYBEES: 40.0    # Core large-cap
+  JUNIORBEES: 25.0   # Next 50 growth
+  LOWVOLIETF: 15.0   # Defensive equity
+  BHARATBOND: 10.0   # Debt component
+  GOLDBEES: 5.0      # Gold hedge
+  MIDCAPETF: 5.0     # Mid-cap exposure
+
+# Tactical Allocation (40% of monthly capital)
+# Deployed only on market dips
+tactical_allocation:
+  NIFTYBEES: 45.0    # Higher core allocation on dips
+  JUNIORBEES: 25.0   # Growth opportunity
+  LOWVOLIETF: 20.0   # Quality stocks on discount
+  MIDCAPETF: 10.0    # Mid-cap opportunity
+  BHARATBOND: 0.0    # No tactical bond buying
+  GOLDBEES: 0.0      # No tactical gold buying
+
+# Extra Capital Allocation (Crash opportunities)
+# Used when market falls significantly
+crash_allocation:
+  NIFTYBEES: 50.0    # Maximum core exposure
+  JUNIORBEES: 30.0   # Strong growth bet
+  LOWVOLIETF: 15.0   # Quality at bargain
+  MIDCAPETF: 5.0     # Small mid-cap exposure
+  BHARATBOND: 0.0    # Focus on equity
+  GOLDBEES: 0.0      # Focus on equity
+
+# Validation Rules
+validation:
+  base_allocation_sum: 100.0
+  tactical_allocation_sum: 100.0
+  crash_allocation_sum: 100.0
+  min_allocation_per_etf: 0.0
+  max_allocation_per_etf: 50.0
+
+# Allocation Metadata
+metadata:
+  version: "1.0"
+  strategy_type: "balanced_growth"
+  risk_profile: "moderate"
+  rebalance_frequency: "monthly"
+  last_updated: "2025-01-29"
+
+# Asset Class Constraints
+asset_class_limits:
+  equity:
+    min: 60.0
+    max: 75.0
+  debt:
+    min: 10.0
+    max: 25.0
+  gold:
+    min: 0.0
+    max: 15.0
+  
+# Single ETF Constraints
+single_etf_limits:
+  NIFTYBEES:
+    max: 45.0
+  JUNIORBEES:
+    max: 30.0
+  LOWVOLIETF:
+    max: 25.0
+  MIDCAPETF:
+    max: 10.0
+  BHARATBOND:
+    max: 20.0
+  GOLDBEES:
+    max: 15.0
