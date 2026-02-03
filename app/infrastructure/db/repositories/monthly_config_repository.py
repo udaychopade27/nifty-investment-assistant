@@ -109,6 +109,7 @@ class MonthlyConfigRepository:
             return None
         
         return MonthlyConfig(
+            id=model.id,
             month=model.month,
             monthly_capital=model.monthly_capital,
             base_capital=model.base_capital,

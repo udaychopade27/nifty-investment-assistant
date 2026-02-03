@@ -13,6 +13,7 @@ from datetime import datetime
 import enum
 
 from app.infrastructure.db.database import Base
+from app.utils.time import now_ist_naive
 
 
 # Enums
@@ -50,7 +51,7 @@ class MonthlyConfigModel(Base):
     trading_days = Column(Integer, nullable=False)
     daily_tranche = Column(Numeric(12, 2), nullable=False)
     strategy_version = Column(String(50), nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
     
     # Relationships
     daily_decisions = relationship("DailyDecisionModel", back_populates="monthly_config")
@@ -76,7 +77,7 @@ class DailyDecisionModel(Base):
     
     explanation = Column(Text, nullable=False)
     strategy_version = Column(String(50), nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
     
     # Relationships
     monthly_config = relationship("MonthlyConfigModel", back_populates="daily_decisions")
@@ -98,7 +99,7 @@ class ETFDecisionModel(Base):
     
     status = Column(SQLEnum(ETFStatusEnum), nullable=False)
     reason = Column(Text, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
     
     # Relationships
     daily_decision = relationship("DailyDecisionModel", back_populates="etf_decisions")
@@ -115,7 +116,7 @@ class ExecutedInvestmentModel(Base):
     __tablename__ = "executed_investment"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    etf_decision_id = Column(Integer, ForeignKey("etf_decision.id"), nullable=False, unique=True)
+    etf_decision_id = Column(Integer, ForeignKey("etf_decision.id"), nullable=True, unique=True)
     etf_symbol = Column(String(20), nullable=False, index=True)
     
     units = Column(Integer, nullable=False)
@@ -125,7 +126,7 @@ class ExecutedInvestmentModel(Base):
     
     capital_bucket = Column(String(20), nullable=False)  # base, tactical, extra
     
-    executed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    executed_at = Column(DateTime, nullable=False, default=now_ist_naive)
     execution_notes = Column(Text, nullable=True)
     
     # Relationships
@@ -146,7 +147,7 @@ class ExtraCapitalInjectionModel(Base):
     month = Column(Date, nullable=False, index=True)
     amount = Column(Numeric(12, 2), nullable=False)
     reason = Column(Text, nullable=False)
-    injected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    injected_at = Column(DateTime, nullable=False, default=now_ist_naive)
 
 
 class CrashOpportunitySignalModel(Base):
@@ -165,7 +166,7 @@ class CrashOpportunitySignalModel(Base):
     three_day_fall_pct = Column(Numeric(6, 2), nullable=False)
     vix_level = Column(Numeric(6, 2), nullable=True)
     
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
 
 
 class MonthlySummaryModel(Base):
@@ -187,7 +188,7 @@ class MonthlySummaryModel(Base):
     investment_days = Column(Integer, nullable=False)
     total_units_purchased = Column(Integer, nullable=False)
     
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
 
 
 class TradingHolidayModel(Base):
@@ -198,7 +199,7 @@ class TradingHolidayModel(Base):
     date = Column(Date, nullable=False, unique=True, index=True)
     description = Column(String(200), nullable=False)
     year = Column(Integer, nullable=False, index=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
 
 
 class MarketDataCacheModel(Base):
@@ -215,8 +216,27 @@ class MarketDataCacheModel(Base):
     close_price = Column(Numeric(10, 2), nullable=False)
     volume = Column(Integer, nullable=True)
     
-    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    fetched_at = Column(DateTime, nullable=False, default=now_ist_naive)
     
     __table_args__ = (
         Index('ix_market_data_unique', 'symbol', 'date', unique=True),
     )
+
+
+class CarryForwardLogModel(Base):
+    """Carry-forward audit log"""
+    __tablename__ = "carry_forward_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(Date, nullable=False, unique=True, index=True)
+    previous_month = Column(Date, nullable=False, index=True)
+
+    base_inflow = Column(Numeric(12, 2), nullable=False)
+    tactical_inflow = Column(Numeric(12, 2), nullable=False)
+    total_inflow = Column(Numeric(12, 2), nullable=False)
+
+    base_carried_forward = Column(Numeric(12, 2), nullable=False)
+    tactical_carried_forward = Column(Numeric(12, 2), nullable=False)
+    total_monthly_capital = Column(Numeric(12, 2), nullable=False)
+
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)

@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import logging
 import asyncio
+import os
+import time
 from typing import AsyncGenerator
 from decimal import Decimal
 
@@ -16,10 +18,8 @@ from app.config import settings
 from app.infrastructure.db.database import init_db, close_db
 from app.domain.services.config_engine import ConfigEngine
 from app.domain.services.market_context_engine import MarketContextEngine
-from app.domain.services.capital_engine import CapitalEngine
 from app.domain.services.allocation_engine import AllocationEngine
 from app.domain.services.unit_calculation_engine import UnitCalculationEngine
-from app.domain.services.decision_engine import DecisionEngine
 from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 
@@ -34,14 +34,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Set process timezone to IST for logging
+os.environ["TZ"] = "Asia/Kolkata"
+if hasattr(time, "tzset"):
+    time.tzset()
 
-# Global instances (loaded once at startup)
+
+# Global instances
 config_engine: ConfigEngine | None = None
 market_context_engine: MarketContextEngine | None = None
-capital_engine: CapitalEngine | None = None
 allocation_engine: AllocationEngine | None = None
 unit_calculation_engine: UnitCalculationEngine | None = None
-decision_engine: DecisionEngine | None = None
 market_data_provider: YFinanceProvider | None = None
 nse_calendar: NSECalendar | None = None
 
@@ -51,56 +54,14 @@ telegram_bot: ETFTelegramBot | None = None
 telegram_task: asyncio.Task | None = None
 
 
-async def start_telegram_bot():
-    """Start Telegram bot in background"""
-    global telegram_bot
-    
-    if not settings.TELEGRAM_ENABLED:
-        logger.info("📱 Telegram bot disabled (set TELEGRAM_ENABLED=True to enable)")
-        return
-    
-    if not settings.TELEGRAM_BOT_TOKEN:
-        logger.warning("⚠️  Telegram bot enabled but no token provided")
-        return
-    
-    try:
-        logger.info("🤖 Starting Telegram bot...")
-        telegram_bot = ETFTelegramBot()
-        
-        # Run bot in background
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, telegram_bot.run)
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to start Telegram bot: {e}")
-
-
-def start_scheduler():
-    """Start scheduler"""
-    global scheduler
-    
-    if not settings.SCHEDULER_ENABLED:
-        logger.info("⏰ Scheduler disabled (set SCHEDULER_ENABLED=True to enable)")
-        return
-    
-    try:
-        logger.info("📅 Starting scheduler...")
-        scheduler = ETFScheduler()
-        scheduler.start()
-        logger.info("✅ Scheduler started successfully")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to start scheduler: {e}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """
     Application lifespan manager
     Handles startup and shutdown of all services
     """
-    global config_engine, market_context_engine, capital_engine
-    global allocation_engine, unit_calculation_engine, decision_engine
+    global config_engine, market_context_engine
+    global allocation_engine, unit_calculation_engine
     global market_data_provider, nse_calendar
     global scheduler, telegram_bot, telegram_task
     
@@ -127,16 +88,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     
     # 3. Initialize infrastructure
     logger.info("\n🏗️  Step 3/5: Initializing infrastructure...")
-    market_data_provider = YFinanceProvider()
+    market_data_provider = YFinanceProvider(
+        enable_nse_fallback=True,
+        nse_primary_for_etfs=True
+    )
     nse_calendar = NSECalendar()
     logger.info("✅ Infrastructure initialized")
     
     # 4. Initialize domain engines
     logger.info("\n🔧 Step 4/5: Initializing domain engines...")
     market_context_engine = MarketContextEngine()
-    capital_engine = CapitalEngine()
     
-    # Create ETF universe dict for allocation engine
     etf_dict = {etf.symbol: etf for etf in config_engine.etf_universe.etfs}
     
     allocation_engine = AllocationEngine(
@@ -155,18 +117,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     logger.info("\n🚀 Step 5/5: Starting background services...")
     
     # Start scheduler
-    start_scheduler()
+    if settings.SCHEDULER_ENABLED:
+        try:
+            logger.info("📅 Starting scheduler...")
+            scheduler = ETFScheduler()
+            scheduler.start()
+            logger.info("✅ Scheduler started successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to start scheduler: {e}")
+    else:
+        logger.info("⏰ Scheduler disabled")
     
-    # Start Telegram bot in background task
+    # Start Telegram bot (async, no threads!)
     if settings.TELEGRAM_ENABLED and settings.TELEGRAM_BOT_TOKEN:
-        telegram_task = asyncio.create_task(start_telegram_bot())
-        logger.info("✅ Telegram bot started in background")
+        try:
+            logger.info("🤖 Starting Telegram bot...")
+            telegram_bot = ETFTelegramBot()
+            
+            # Create async task (runs in FastAPI's event loop)
+            telegram_task = asyncio.create_task(telegram_bot.start_async())
+            
+            logger.info("✅ Telegram bot task created successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to start Telegram bot: {e}")
+    else:
+        logger.info("📱 Telegram bot disabled")
     
     logger.info("\n" + "="*60)
     logger.info("🎯 All Services Running:")
     logger.info(f"   ✅ API Server: http://{settings.API_HOST}:{settings.API_PORT}")
+    logger.info(f"   ✅ API Docs: http://{settings.API_HOST}:{settings.API_PORT}/docs")
     logger.info(f"   ✅ Scheduler: {'Enabled' if settings.SCHEDULER_ENABLED else 'Disabled'}")
     logger.info(f"   ✅ Telegram: {'Enabled' if settings.TELEGRAM_ENABLED else 'Disabled'}")
+    logger.info("   ✅ Capital Model: Base + Tactical (Strict Separation)")
     logger.info("="*60 + "\n")
     
     yield
@@ -191,8 +174,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         try:
             await telegram_task
         except asyncio.CancelledError:
-            pass
-        logger.info("✅ Telegram bot stopped")
+            logger.info("✅ Telegram bot stopped gracefully")
     
     # Close database
     logger.info("📊 Closing database connections...")
@@ -206,8 +188,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
 # Create FastAPI app
 app = FastAPI(
-    title="Indian ETF Investing Assistant",
-    description="Production-grade ETF investing system for Indian markets (NSE) with Scheduler & Telegram",
+    title="Indian ETF Investing Assistant - Base + Tactical",
+    description="Disciplined ETF investing with strict capital separation",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -215,11 +197,15 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure properly in production
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 # Health check endpoint
@@ -234,90 +220,37 @@ async def health_check():
         "services": {
             "api": "running",
             "scheduler": "running" if scheduler else "disabled",
-            "telegram": "running" if telegram_bot else "disabled",
+            "telegram": "running" if telegram_task and not telegram_task.done() else "disabled",
             "database": "connected"
-        }
+        },
+        "capital_model": "Base + Tactical (Strict Separation)"
     }
 
 
 @app.get("/")
 async def root():
-    """Root endpoint with system info"""
+    """Root endpoint"""
     return {
-        "message": "🇮🇳 Indian ETF Investing Assistant API",
+        "message": "🇮🇳 Indian ETF Investing Assistant",
         "version": "1.0.0",
-        "strategy": config_engine.strategy_version if config_engine else "Not loaded",
-        "services": {
-            "api": "running",
-            "scheduler": "running" if scheduler and settings.SCHEDULER_ENABLED else "disabled",
-            "telegram": "running" if telegram_bot and settings.TELEGRAM_ENABLED else "disabled"
+        "capital_model": {
+            "base": "Systematic, any day",
+            "tactical": "Signal-driven only"
         },
-        "docs": "/docs",
-        "health": "/health",
-        "endpoints": {
-            "config": "/api/v1/config",
-            "decision": "/api/v1/decision",
-            "portfolio": "/api/v1/portfolio",
-            "capital": "/api/v1/capital"
-        }
-    }
-
-
-@app.get("/services/status")
-async def services_status():
-    """Get detailed status of all services"""
-    scheduler_jobs = []
-    if scheduler and scheduler.scheduler:
-        scheduler_jobs = [
-            {
-                "id": job.id,
-                "name": job.name,
-                "next_run": str(job.next_run_time) if job.next_run_time else None
-            }
-            for job in scheduler.scheduler.get_jobs()
-        ]
-    
-    return {
-        "api": {
-            "status": "running",
-            "host": settings.API_HOST,
-            "port": settings.API_PORT
-        },
-        "scheduler": {
-            "enabled": settings.SCHEDULER_ENABLED,
-            "status": "running" if scheduler else "disabled",
-            "jobs": scheduler_jobs
-        },
-        "telegram": {
-            "enabled": settings.TELEGRAM_ENABLED,
-            "status": "running" if telegram_bot else "disabled",
-            "configured": bool(settings.TELEGRAM_BOT_TOKEN)
-        },
-        "database": {
-            "status": "connected",
-            "url": settings.DATABASE_URL.split('@')[1] if '@' in settings.DATABASE_URL else "configured"
-        },
-        "configuration": {
-            "etfs": len(config_engine.etf_universe.etfs) if config_engine else 0,
-            "strategy": config_engine.strategy_version if config_engine else None
-        }
+        "docs": "/docs"
     }
 
 
 # Import and include routers
-from app.api.routes import decision, portfolio, config as config_routes, capital
+from app.api.routes import decision, portfolio, config as config_routes, capital, invest
 
 app.include_router(capital.router, prefix="/api/v1/capital", tags=["Capital"])
-app.include_router(decision.router, prefix="/api/v1/decision", tags=["Decision"])
+app.include_router(decision.router, prefix="/api/v1/decision", tags=["Tactical Signals"])
+app.include_router(invest.router, prefix="/api/v1/invest", tags=["Base & Tactical Execution"])
 app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["Portfolio"])
 app.include_router(config_routes.router, prefix="/api/v1/config", tags=["Config"])
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host=settings.API_HOST,
-        port=settings.API_PORT,
-        reload=settings.DEBUG
-    )
+    uvicorn.run("app.main:app", host=settings.API_HOST, port=settings.API_PORT, reload=settings.DEBUG)

@@ -1,62 +1,74 @@
 # Core Framework
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.3
+pydantic-settings>=2.1.0
 
 # Database
 asyncpg>=0.29.0
-sqlalchemy==2.0.25
-psycopg2-binary==2.9.9
-alembic==1.13.1
+sqlalchemy>=2.0.25
+psycopg2-binary>=2.9.9
+alembic>=1.13.1
 
 # Telegram Bot (UPDATED – fixes httpx conflict)
 python-telegram-bot>=20.7
 
 # Market Data
-yfinance==0.2.35
-nsepy==0.8
-pandas==2.1.4
-numpy==1.26.3
+yfinance>=0.2.35
+nsepy>=0.8
+pandas>=2.1.4
+numpy>=1.26.3
 
 # Scheduler
-apscheduler==3.10.4
+apscheduler>=3.10.4
 
 # HTTP & API
 httpx>=0.25.2
-requests==2.31.0
-beautifulsoup4==4.12.3
+requests>=2.31.0
+beautifulsoup4>=4.12.3
 
 # Date & Time
-python-dateutil==2.8.2
-pytz==2023.3.post1
+python-dateutil>=2.8.2
+pytz>=2023.3.post1
 
 # Configuration
-pyyaml==6.0.1
-python-dotenv==1.0.0
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
 
 # Logging & Monitoring
-structlog==24.1.0
-python-json-logger==2.0.7
+structlog>=24.1.0
+python-json-logger>=2.0.7
 
 # Testing
-pytest==7.4.4
-pytest-asyncio==0.23.3
-pytest-cov==4.1.0
-pytest-mock==3.12.0
-httpx==0.26.0
+pytest>=7.4.4
+pytest-asyncio>=0.23.3
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
+httpx>=0.26.0
+faker>=20.1.0
 
 # Development
-black==23.12.1
-flake8==7.0.0
-mypy==1.8.0
-isort==5.13.2
+black>=23.12.1
+flake8>=7.0.0
+mypy>=1.8.0
+isort>=5.13.2
 
 # Optional: Redis for caching
-redis==5.0.1
+redis>=5.0.1
 
 # Optional: Monitoring
-sentry-sdk==1.39.2
+sentry-sdk>=1.39.2
 
 # Utilities
-typing-extensions==4.9.0
+typing-extensions>=4.9.0
+
+# Code Quality
+flake8>=6.1.0
+mypy>=1.7.1
+isort>=5.12.0
+
+# Documentation
+mkdocs>=1.5.3
+mkdocs-material>=9.4.14
+# Development
+ipython>=8.18.0

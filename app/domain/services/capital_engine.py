@@ -1,6 +1,9 @@
 """
-CAPITAL ENGINE (ENGINE-2)
+CAPITAL ENGINE (ENGINE-2) - ASYNC VERSION
 Single source of truth for capital state
+
+✅ FIXED: All repository methods properly awaited
+✅ FIXED: All methods that call repositories are now async
 
 RESPONSIBILITIES:
 - Track monthly capital configuration
@@ -15,55 +18,58 @@ RULES:
 ✅ Capital buckets isolated
 ✅ Carry-forward preserved
 ✅ Pure state calculation
+✅ Async/await properly used
 """
 
 from datetime import date
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, Optional
 
 from app.domain.models import CapitalState, MonthlyConfig
 
 
 class MonthlyConfigRepository(Protocol):
-    """Protocol for monthly config data access"""
+    """Protocol for monthly config data access - ASYNC"""
     
-    def get_for_month(self, month: date) -> MonthlyConfig | None:
+    async def get_for_month(self, month: date) -> Optional[MonthlyConfig]:
         """Get monthly config for a specific month"""
         ...
     
-    def get_current(self) -> MonthlyConfig | None:
+    async def get_current(self) -> Optional[MonthlyConfig]:
         """Get current month's config"""
         ...
 
 
 class ExecutedInvestmentRepository(Protocol):
-    """Protocol for executed investment data access"""
+    """Protocol for executed investment data access - ASYNC"""
     
-    def get_total_base_deployed(self, month: date) -> Decimal:
+    async def get_total_base_deployed(self, month: date) -> Decimal:
         """Get total base capital deployed this month"""
         ...
     
-    def get_total_tactical_deployed(self, month: date) -> Decimal:
+    async def get_total_tactical_deployed(self, month: date) -> Decimal:
         """Get total tactical capital deployed this month"""
         ...
     
-    def get_total_extra_deployed(self, month: date) -> Decimal:
+    async def get_total_extra_deployed(self, month: date) -> Decimal:
         """Get total extra capital deployed this month"""
         ...
 
 
 class ExtraCapitalRepository(Protocol):
-    """Protocol for extra capital injection data access"""
+    """Protocol for extra capital injection data access - ASYNC"""
     
-    def get_total_for_month(self, month: date) -> Decimal:
+    async def get_total_for_month(self, month: date) -> Decimal:
         """Get total extra capital injected this month"""
         ...
 
 
 class CapitalEngine:
     """
-    Capital Engine
+    Capital Engine - ASYNC VERSION
     Maintains truthful capital state across buckets
+    
+    ✅ CRITICAL FIX: All methods that access repositories are now async
     """
     
     def __init__(
@@ -77,9 +83,11 @@ class CapitalEngine:
         self.executed_investment_repo = executed_investment_repo
         self.extra_capital_repo = extra_capital_repo
     
-    def get_capital_state(self, month: date) -> CapitalState:
+    async def get_capital_state(self, month: date) -> CapitalState:
         """
         Get current capital state for a month
+        
+        ✅ FIXED: Now properly awaits all repository calls
         
         Args:
             month: Month to get state for (first day of month)
@@ -90,18 +98,18 @@ class CapitalEngine:
         Raises:
             ValueError: If MonthlyConfig doesn't exist
         """
-        # Get monthly config
-        config = self.monthly_config_repo.get_for_month(month)
+        # ✅ FIXED: Await the async call
+        config = await self.monthly_config_repo.get_for_month(month)
         if config is None:
             raise ValueError(f"No MonthlyConfig found for {month}")
         
-        # Get deployed amounts
-        base_deployed = self.executed_investment_repo.get_total_base_deployed(month)
-        tactical_deployed = self.executed_investment_repo.get_total_tactical_deployed(month)
-        extra_deployed = self.executed_investment_repo.get_total_extra_deployed(month)
+        # ✅ FIXED: Await all async repository calls
+        base_deployed = await self.executed_investment_repo.get_total_base_deployed(month)
+        tactical_deployed = await self.executed_investment_repo.get_total_tactical_deployed(month)
+        extra_deployed = await self.executed_investment_repo.get_total_extra_deployed(month)
         
-        # Get extra capital injected
-        extra_injected = self.extra_capital_repo.get_total_for_month(month)
+        # ✅ FIXED: Await the async call
+        extra_injected = await self.extra_capital_repo.get_total_for_month(month)
         
         # Calculate remaining
         base_remaining = config.base_capital - base_deployed
@@ -123,9 +131,11 @@ class CapitalEngine:
             extra_remaining=extra_remaining
         )
     
-    def get_current_capital_state(self) -> CapitalState:
+    async def get_current_capital_state(self) -> CapitalState:
         """
         Get capital state for current month
+        
+        ✅ FIXED: Now async and awaits repository call
         
         Returns:
             CapitalState object
@@ -133,15 +143,19 @@ class CapitalEngine:
         Raises:
             ValueError: If no current MonthlyConfig exists
         """
-        config = self.monthly_config_repo.get_current()
+        # ✅ FIXED: Await the async call
+        config = await self.monthly_config_repo.get_current()
         if config is None:
             raise ValueError("No MonthlyConfig found for current month")
         
-        return self.get_capital_state(config.month)
+        # ✅ FIXED: Await the async call
+        return await self.get_capital_state(config.month)
     
     def calculate_daily_tranche(self, config: MonthlyConfig) -> Decimal:
         """
         Calculate daily base capital tranche
+        
+        This method remains sync as it only does calculations
         
         Args:
             config: Monthly configuration
@@ -161,6 +175,8 @@ class CapitalEngine:
     ) -> tuple[bool, str]:
         """
         Check if tactical capital deployment is possible
+        
+        This method remains sync as it only validates state
         
         Args:
             capital_state: Current capital state
@@ -184,6 +200,8 @@ class CapitalEngine:
     ) -> tuple[bool, str]:
         """
         Check if extra capital deployment is possible
+        
+        This method remains sync as it only validates state
         
         Args:
             capital_state: Current capital state
@@ -209,6 +227,8 @@ class CapitalEngine:
         """
         Calculate how much tactical capital to carry forward to next month
         
+        This method remains sync as it only does calculations
+        
         Args:
             previous_month_state: Previous month's final state
             new_monthly_capital: New month's total capital
@@ -219,8 +239,9 @@ class CapitalEngine:
         """
         unused_tactical = previous_month_state.tactical_remaining
         
-        # Calculate cap
-        carry_forward_cap = (new_monthly_capital * Decimal('0.4')) * carry_forward_cap_multiplier
+        # Calculate cap (40% of new monthly capital * multiplier)
+        tactical_portion = new_monthly_capital * Decimal('0.4')
+        carry_forward_cap = tactical_portion * carry_forward_cap_multiplier
         
         # Return minimum of unused and cap
         return min(unused_tactical, carry_forward_cap)
@@ -231,6 +252,8 @@ class CapitalEngine:
     ) -> tuple[bool, list[str]]:
         """
         Validate capital state integrity
+        
+        This method remains sync as it only validates state
         
         Args:
             capital_state: Capital state to validate

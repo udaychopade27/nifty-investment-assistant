@@ -1,269 +1,396 @@
 """
 YFinance Market Data Provider
-Fetch real-time and historical market data from Yahoo Finance
+Reliable async-safe Yahoo Finance integration for Indian ETFs & indices
 """
 
+import asyncio
+import os
+import random
+import time
 import yfinance as yf
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, List
 import logging
 
 logger = logging.getLogger(__name__)
 
+from app.infrastructure.market_data.nse_india_provider import get_nse_provider
+
 
 class YFinanceProvider:
     """
     Yahoo Finance data provider for Indian ETFs and indices
+    Async-safe via thread offloading
     """
-    
-    def __init__(self):
-        """Initialize YFinance provider"""
-        # NSE symbol mapping (add .NS suffix for Yahoo Finance)
-        self.symbol_mapping = {
-            'NIFTYBEES': 'NIFTYBEES.NS',
-            'JUNIORBEES': 'JUNIORBEES.NS',
-            'LOWVOLIETF': 'LOWVOLIETF.NS',
-            'BHARATBOND': 'BHARATBOND.NS',
-            'GOLDBEES': 'GOLDBEES.NS',
-            'MIDCAPETF': 'MIDCAPETF.NS',
-            'NIFTY50': '^NSEI',
-            'INDIA_VIX': '^INDIAVIX'
-        }
-    
-    async def get_current_price(
+
+    def __init__(
         self,
-        symbol: str
-    ) -> Optional[Decimal]:
-        """
-        Get current/latest price for a symbol
-        
-        Args:
-            symbol: ETF symbol
-        
-        Returns:
-            Current price or None if unavailable
-        """
-        try:
-            yf_symbol = self.symbol_mapping.get(symbol, f"{symbol}.NS")
-            ticker = yf.Ticker(yf_symbol)
-            
-            # Get latest data
-            hist = ticker.history(period='1d')
-            
-            if hist.empty:
-                logger.warning(f"No price data for {symbol}")
-                return None
-            
-            # Get latest close
-            latest_close = float(hist['Close'].iloc[-1])
-            return Decimal(str(latest_close)).quantize(Decimal('0.01'))
-            
-        except Exception as e:
-            logger.error(f"Error fetching price for {symbol}: {e}")
+        enable_nse_fallback: bool = True,
+        nse_primary_for_etfs: bool = True,
+        cache_ttl_seconds: int = 60
+    ):
+        self.symbol_mapping = {
+            "NIFTYBEES": "NIFTYBEES.NS",
+            "JUNIORBEES": "JUNIORBEES.NS",
+            "LOWVOLIETF": "LOWVOLIETF.NS",
+            "BHARATBOND": "BHARATBOND.NS",
+            "GOLDBEES": "GOLDBEES.NS",
+            "MIDCAPETF": "MIDCAPETF.NS",
+            "NIFTY50": "^NSEI",
+            "INDIA_VIX": "^INDIAVIX",
+        }
+        self.enable_nse_fallback = enable_nse_fallback
+        self.nse_primary_for_etfs = nse_primary_for_etfs
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._cache: Dict[str, tuple[float, object]] = {}
+        self._apply_symbol_overrides()
+
+    def _get_nse_provider(self):
+        if not self.enable_nse_fallback:
             return None
-    
+        return get_nse_provider(allow_static_fallback=False)
+
+    def _apply_symbol_overrides(self) -> None:
+        """
+        Apply Yahoo symbol mapping overrides from env.
+
+        Format: YF_SYMBOL_OVERRIDES="BHARATBOND=BHARATBOND.NS,FOO=FOO.NS"
+        """
+        raw = os.getenv("YF_SYMBOL_OVERRIDES", "").strip()
+        if not raw:
+            return
+        overrides: Dict[str, str] = {}
+        for pair in raw.split(","):
+            pair = pair.strip()
+            if not pair or "=" not in pair:
+                continue
+            key, value = pair.split("=", 1)
+            key = key.strip().upper()
+            value = value.strip()
+            if key and value:
+                overrides[key] = value
+        if overrides:
+            self.symbol_mapping.update(overrides)
+
+    # ------------------------------------------------------------------
+    # INTERNAL HELPERS
+    # ------------------------------------------------------------------
+
+    async def _history(self, ticker: yf.Ticker, **kwargs):
+        """
+        Async-safe wrapper around yfinance history()
+        """
+        return await asyncio.to_thread(ticker.history, **kwargs)
+
+    async def _history_with_retry(self, ticker: yf.Ticker, retries: int = 2, **kwargs):
+        """
+        Retry wrapper around history() to handle transient failures.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                return await self._history(ticker, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                await asyncio.sleep(0.4 * (2 ** attempt) + random.random() * 0.2)
+        if last_exc:
+            raise last_exc
+        return await self._history(ticker, **kwargs)
+
+    def _quantize(self, value: float) -> Decimal:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+
+    def _cache_get(self, key: str) -> Optional[object]:
+        cached = self._cache.get(key)
+        if not cached:
+            return None
+        ts, value = cached
+        if time.time() - ts > self.cache_ttl_seconds:
+            return None
+        return value
+
+    def _cache_set(self, key: str, value: object) -> None:
+        self._cache[key] = (time.time(), value)
+
+    # ------------------------------------------------------------------
+    # CURRENT PRICES
+    # ------------------------------------------------------------------
+
+    async def get_current_price(self, symbol: str) -> Optional[Decimal]:
+        prices = await self.get_current_prices([symbol])
+        return prices.get(symbol)
+
+    async def get_current_prices(self, symbols: List[str]) -> Dict[str, Decimal]:
+        """
+        Get latest available prices (EOD-safe for NSE)
+        """
+        cache_key = f"current_prices:{','.join(sorted(symbols))}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        prices: Dict[str, Decimal] = {}
+
+        nse_provider = self._get_nse_provider()
+
+        for symbol in symbols:
+            # NSE primary for ETFs (not indices)
+            if self.nse_primary_for_etfs and nse_provider and symbol not in ("NIFTY50", "INDIA_VIX", "BHARATBOND"):
+                try:
+                    nse_price = await nse_provider.get_current_price(symbol)
+                    if nse_price and nse_price > 0:
+                        prices[symbol] = nse_price
+                        continue
+                except Exception as nse_error:
+                    logger.error(f"Error fetching NSE price for {symbol}: {nse_error}")
+
+            try:
+                yf_symbol = self.symbol_mapping.get(symbol, f"{symbol}.NS")
+                ticker = yf.Ticker(yf_symbol)
+
+                # NSE ETFs often have NO intraday data → use last 5 days
+                hist = await self._history_with_retry(
+                    ticker,
+                    period="5d",
+                    interval="1d",
+                    auto_adjust=False
+                )
+
+                if hist.empty or "Close" not in hist:
+                    logger.warning(f"No price data for {symbol}")
+                    if nse_provider:
+                        nse_price = await nse_provider.get_current_price(symbol)
+                        if nse_price and nse_price > 0:
+                            prices[symbol] = nse_price
+                    continue
+
+                close = float(hist["Close"].dropna().iloc[-1])
+
+                if close > 0:
+                    prices[symbol] = self._quantize(close)
+
+            except Exception as e:
+                logger.error(f"Error fetching current price for {symbol}: {e}")
+                if nse_provider:
+                    try:
+                        nse_price = await nse_provider.get_current_price(symbol)
+                        if nse_price and nse_price > 0:
+                            prices[symbol] = nse_price
+                    except Exception as nse_error:
+                        logger.error(f"Error fetching NSE price for {symbol}: {nse_error}")
+
+        self._cache_set(cache_key, prices)
+        return prices
+
+    # ------------------------------------------------------------------
+    # HISTORICAL PRICES
+    # ------------------------------------------------------------------
+
     async def get_prices_for_date(
         self,
         symbols: List[str],
         target_date: date
     ) -> Dict[str, Decimal]:
-        """
-        Get prices for multiple symbols on a specific date
-        
-        Args:
-            symbols: List of ETF symbols
-            target_date: Date to fetch prices for
-        
-        Returns:
-            Dictionary of symbol -> price
-        """
-        prices = {}
-        
+        prices: Dict[str, Decimal] = {}
+
         for symbol in symbols:
             price = await self.get_price_for_date(symbol, target_date)
             if price:
                 prices[symbol] = price
-        
+
         return prices
-    
+
     async def get_price_for_date(
         self,
         symbol: str,
         target_date: date
     ) -> Optional[Decimal]:
         """
-        Get price for a symbol on a specific date
-        
-        Args:
-            symbol: ETF symbol
-            target_date: Date to fetch price for
-        
-        Returns:
-            Close price or None
+        Get closing price for a specific date
+        Falls back to last available close before date
         """
         try:
+            # NSE does not provide historical API here; only use NSE for near-current dates
+            if self.nse_primary_for_etfs and symbol not in ("NIFTY50", "INDIA_VIX", "BHARATBOND"):
+                today = date.today()
+                if target_date >= today - timedelta(days=1):
+                    nse_provider = self._get_nse_provider()
+                    if nse_provider:
+                        nse_price = await nse_provider.get_current_price(symbol)
+                        if nse_price and nse_price > 0:
+                            return nse_price
+
             yf_symbol = self.symbol_mapping.get(symbol, f"{symbol}.NS")
             ticker = yf.Ticker(yf_symbol)
-            
-            # Fetch data for the specific date (with buffer)
-            start_date = target_date - timedelta(days=5)
-            end_date = target_date + timedelta(days=1)
-            
-            hist = ticker.history(start=start_date, end=end_date)
-            
+
+            hist = await self._history_with_retry(
+                ticker,
+                start=target_date - timedelta(days=7),
+                end=target_date + timedelta(days=1),
+                interval="1d",
+                auto_adjust=False
+            )
+
             if hist.empty:
-                logger.warning(f"No historical data for {symbol} on {target_date}")
+                nse_provider = self._get_nse_provider()
+                if nse_provider:
+                    return await nse_provider.get_current_price(symbol)
                 return None
-            
-            # Find exact date or nearest
+
             hist.index = hist.index.date
-            
+
             if target_date in hist.index:
-                close_price = float(hist.loc[target_date]['Close'])
-                return Decimal(str(close_price)).quantize(Decimal('0.01'))
+                close = float(hist.loc[target_date]["Close"])
             else:
-                # Get nearest available date
-                logger.warning(f"Exact date {target_date} not found for {symbol}, using nearest")
-                close_price = float(hist['Close'].iloc[-1])
-                return Decimal(str(close_price)).quantize(Decimal('0.01'))
-                
+                close = float(hist["Close"].dropna().iloc[-1])
+
+            return self._quantize(close)
+
         except Exception as e:
             logger.error(f"Error fetching historical price for {symbol}: {e}")
+            nse_provider = self._get_nse_provider()
+            if nse_provider:
+                try:
+                    return await nse_provider.get_current_price(symbol)
+                except Exception as nse_error:
+                    logger.error(f"Error fetching NSE price for {symbol}: {nse_error}")
             return None
-    
-    async def get_nifty_data(
-        self,
-        target_date: date
-    ) -> Optional[Dict]:
-        """
-        Get NIFTY 50 data for a specific date
-        
-        Args:
-            target_date: Date to fetch data for
-        
-        Returns:
-            Dictionary with NIFTY data or None
-        """
+
+    # ------------------------------------------------------------------
+    # NIFTY DATA
+    # ------------------------------------------------------------------
+
+    async def get_nifty_data(self, target_date: date) -> Optional[Dict]:
         try:
-            ticker = yf.Ticker('^NSEI')
-            
-            # Fetch data
-            start_date = target_date - timedelta(days=10)
-            end_date = target_date + timedelta(days=1)
-            
-            hist = ticker.history(start=start_date, end=end_date)
-            
+            cache_key = f"nifty:{target_date.isoformat()}"
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+
+            ticker = yf.Ticker("^NSEI")
+
+            hist = await self._history_with_retry(
+                ticker,
+                start=target_date - timedelta(days=10),
+                end=target_date + timedelta(days=1),
+                interval="1d",
+                auto_adjust=False
+            )
+
             if hist.empty:
-                logger.error(f"No NIFTY data for {target_date}")
                 return None
-            
+
             hist.index = hist.index.date
-            
-            # Get exact date
-            if target_date in hist.index:
-                row = hist.loc[target_date]
-                
-                # Get previous close (for change calculation)
-                hist_list = hist.index.tolist()
-                target_idx = hist_list.index(target_date)
-                
-                previous_close = None
-                if target_idx > 0:
-                    prev_date = hist_list[target_idx - 1]
-                    previous_close = float(hist.loc[prev_date]['Close'])
-                
-                return {
-                    'date': target_date,
-                    'open': Decimal(str(row['Open'])).quantize(Decimal('0.01')),
-                    'high': Decimal(str(row['High'])).quantize(Decimal('0.01')),
-                    'low': Decimal(str(row['Low'])).quantize(Decimal('0.01')),
-                    'close': Decimal(str(row['Close'])).quantize(Decimal('0.01')),
-                    'volume': int(row['Volume']),
-                    'previous_close': Decimal(str(previous_close)).quantize(Decimal('0.01')) if previous_close else None
-                }
-            else:
-                logger.warning(f"Exact NIFTY data not found for {target_date}")
+
+            if target_date not in hist.index:
                 return None
-                
+
+            row = hist.loc[target_date]
+            idx = list(hist.index).index(target_date)
+
+            prev_close = (
+                float(hist.iloc[idx - 1]["Close"])
+                if idx > 0 else None
+            )
+
+            data = {
+                "date": target_date,
+                "open": self._quantize(row["Open"]),
+                "high": self._quantize(row["High"]),
+                "low": self._quantize(row["Low"]),
+                "close": self._quantize(row["Close"]),
+                "volume": int(row["Volume"]),
+                "previous_close": (
+                    self._quantize(prev_close)
+                    if prev_close else None
+                ),
+            }
+            self._cache_set(cache_key, data)
+            return data
+
         except Exception as e:
             logger.error(f"Error fetching NIFTY data: {e}")
             return None
-    
+
+    # ------------------------------------------------------------------
+    # LAST N CLOSES
+    # ------------------------------------------------------------------
+
     async def get_last_n_closes(
         self,
         symbol: str,
         n: int,
         end_date: Optional[date] = None
     ) -> List[Decimal]:
-        """
-        Get last N closing prices
-        
-        Args:
-            symbol: Symbol to fetch
-            n: Number of closes to fetch
-            end_date: End date (default today)
-        
-        Returns:
-            List of closing prices (oldest first)
-        """
         try:
             yf_symbol = self.symbol_mapping.get(symbol, f"{symbol}.NS")
             ticker = yf.Ticker(yf_symbol)
-            
-            if end_date is None:
-                end_date = date.today()
-            
-            start_date = end_date - timedelta(days=n*2)  # Buffer for weekends/holidays
-            
-            hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
-            
+
+            end_date = end_date or date.today()
+            start_date = end_date - timedelta(days=n * 3)
+
+            hist = await self._history_with_retry(
+                ticker,
+                start=start_date,
+                end=end_date + timedelta(days=1),
+                interval="1d",
+                auto_adjust=False
+            )
+
             if hist.empty or len(hist) < n:
-                logger.warning(f"Insufficient data for {symbol}")
                 return []
-            
-            # Get last N closes
-            closes = hist['Close'].tail(n).tolist()
-            return [Decimal(str(c)).quantize(Decimal('0.01')) for c in closes]
-            
+
+            closes = hist["Close"].dropna().tail(n)
+            return [self._quantize(float(c)) for c in closes]
+
         except Exception as e:
-            logger.error(f"Error fetching last {n} closes for {symbol}: {e}")
+            logger.error(f"Error fetching closes for {symbol}: {e}")
             return []
-    
+
+    # ------------------------------------------------------------------
+    # INDIA VIX
+    # ------------------------------------------------------------------
+
     async def get_india_vix(
         self,
         target_date: Optional[date] = None
     ) -> Optional[Decimal]:
-        """
-        Get India VIX (volatility index)
-        
-        Args:
-            target_date: Date to fetch VIX for (default today)
-        
-        Returns:
-            VIX value or None
-        """
         try:
-            ticker = yf.Ticker('^INDIAVIX')
-            
+            cache_key = f"vix:{target_date.isoformat() if target_date else 'latest'}"
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+
+            ticker = yf.Ticker("^INDIAVIX")
+
             if target_date:
-                start = target_date - timedelta(days=5)
-                end = target_date + timedelta(days=1)
-                hist = ticker.history(start=start, end=end)
-                
-                if not hist.empty:
-                    hist.index = hist.index.date
-                    if target_date in hist.index:
-                        vix = float(hist.loc[target_date]['Close'])
-                        return Decimal(str(vix)).quantize(Decimal('0.01'))
+                hist = await self._history_with_retry(
+                    ticker,
+                    start=target_date - timedelta(days=5),
+                    end=target_date + timedelta(days=1),
+                    interval="1d",
+                    auto_adjust=False
+                )
+
+                hist.index = hist.index.date
+                if target_date in hist.index:
+                    value = self._quantize(
+                        float(hist.loc[target_date]["Close"])
+                    )
+                    self._cache_set(cache_key, value)
+                    return value
             else:
-                hist = ticker.history(period='1d')
+                hist = await self._history_with_retry(ticker, period="5d")
                 if not hist.empty:
-                    vix = float(hist['Close'].iloc[-1])
-                    return Decimal(str(vix)).quantize(Decimal('0.01'))
-            
+                    value = self._quantize(
+                        float(hist["Close"].dropna().iloc[-1])
+                    )
+                    self._cache_set(cache_key, value)
+                    return value
+
             return None
-            
+
         except Exception as e:
             logger.error(f"Error fetching India VIX: {e}")
             return None

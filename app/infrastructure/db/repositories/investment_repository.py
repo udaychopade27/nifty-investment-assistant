@@ -214,6 +214,35 @@ class ExecutedInvestmentRepository:
             })
         
         return holdings
+
+    async def get_recent(self, limit: int = 50) -> List[ExecutedInvestment]:
+        """
+        Get most recent executed investments (all buckets)
+        """
+        result = await self.session.execute(
+            select(ExecutedInvestmentModel)
+            .order_by(ExecutedInvestmentModel.executed_at.desc())
+            .limit(limit)
+        )
+        models = result.scalars().all()
+        return [self._to_domain(m) for m in models]
+
+    async def get_by_capital_bucket(
+        self,
+        capital_bucket: str,
+        limit: int = 50
+    ) -> List[ExecutedInvestment]:
+        """
+        Get recent executed investments for a specific capital bucket
+        """
+        result = await self.session.execute(
+            select(ExecutedInvestmentModel)
+            .where(ExecutedInvestmentModel.capital_bucket == capital_bucket)
+            .order_by(ExecutedInvestmentModel.executed_at.desc())
+            .limit(limit)
+        )
+        models = result.scalars().all()
+        return [self._to_domain(m) for m in models]
     
     @staticmethod
     def _to_domain(model: Optional[ExecutedInvestmentModel]) -> Optional[ExecutedInvestment]:

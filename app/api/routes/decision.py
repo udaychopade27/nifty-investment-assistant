@@ -18,6 +18,7 @@ from app.infrastructure.db.repositories.decision_repository import (
 )
 from app.infrastructure.db.repositories.monthly_config_repository import MonthlyConfigRepository
 from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
+from app.utils.time import now_ist_naive
 from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 from app.domain.services.market_context_engine import MarketContextEngine
@@ -136,54 +137,109 @@ async def execute_investment(
 ):
     """
     Execute manual investment and record in database
-    
-    Validates and records execution
+
+    Rules:
+    - BASE → no decision required (etf_decision_id = NULL)
+    - TACTICAL → today's ETF decision REQUIRED
     """
     try:
         from app.infrastructure.db.models import ExecutedInvestmentModel
-        
-        # Validate positive values
+        from app.infrastructure.db.repositories.decision_repository import (
+            DailyDecisionRepository,
+            ETFDecisionRepository,
+        )
+
+        # 1. Validate inputs
         if request.units <= 0 or request.executed_price <= 0:
             raise HTTPException(
                 status_code=400,
                 detail="Units and price must be positive"
             )
-        
-        # Calculate total amount
+
         total_amount = Decimal(str(request.units)) * Decimal(str(request.executed_price))
-        
-        # Create investment record
+
+        etf_decision_id = None
+        capital_bucket = request.capital_bucket.lower()
+
+        # 2. BASE investment → NO decision link
+        if capital_bucket == "base":
+            etf_decision_id = None
+
+        # 3. TACTICAL investment → MUST link today's decision
+        elif capital_bucket == "tactical":
+            today = date.today()
+
+            daily_repo = DailyDecisionRepository(db)
+            daily_decision = await daily_repo.get_today()
+
+            if not daily_decision:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No daily decision found for today"
+                )
+
+            if daily_decision.decision_type.value == "NONE":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Today's decision is NONE. Tactical execution not allowed."
+                )
+
+            etf_repo = ETFDecisionRepository(db)
+            etf_decision = await etf_repo.get_by_decision_and_symbol(
+                daily_decision.id,
+                request.etf_symbol
+            )
+
+            if not etf_decision:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No ETF decision for {request.etf_symbol} today"
+                )
+
+            etf_decision_id = etf_decision.id
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid capital_bucket. Must be 'base' or 'tactical'."
+            )
+
+        # 4. Create investment record
         investment = ExecutedInvestmentModel(
-            etf_decision_id=1,  # Simplified - would link to actual decision
+            etf_decision_id=etf_decision_id,
             etf_symbol=request.etf_symbol,
             units=request.units,
             executed_price=Decimal(str(request.executed_price)),
             total_amount=total_amount,
-            slippage_pct=Decimal('0'),  # Could calculate from decision
-            capital_bucket='base',  # Could determine from decision
-            executed_at=datetime.now(),
-            execution_notes=request.notes or "Executed via API"
+            slippage_pct=Decimal("0"),
+            capital_bucket=capital_bucket,
+            executed_at=now_ist_naive(),
+            execution_notes=request.notes or "Executed via Telegram"
         )
-        
+
         db.add(investment)
         await db.commit()
-        
+        await db.refresh(investment)
+
         return {
             "status": "success",
-            "message": "Investment recorded successfully",
-            "etf_symbol": request.etf_symbol,
-            "units": request.units,
-            "price": float(request.executed_price),
-            "total_amount": float(total_amount)
+            "id": investment.id,
+            "capital_bucket": capital_bucket,
+            "etf_symbol": investment.etf_symbol,
+            "units": investment.units,
+            "price": float(investment.executed_price),
+            "total_amount": float(investment.total_amount),
+            "decision_linked": etf_decision_id is not None
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error executing investment: {e}")
+        logger.error(f"❌ Error executing investment: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to record investment: {str(e)}"
         )
-
 
 @router.post("/generate")
 async def generate_decision(

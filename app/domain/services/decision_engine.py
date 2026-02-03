@@ -6,12 +6,12 @@ RESPONSIBILITIES:
 - Orchestrate all engines
 - Determine decision type (NONE/SMALL/MEDIUM/FULL)
 - Generate complete daily decision
-- Persist to database
 
 RULES:
 ❌ No execution
 ❌ No state mutation
 ❌ No retries
+❌ No DB access (CRITICAL FIX)
 ✅ Idempotent
 ✅ Persist even if no investment
 ✅ Always explain
@@ -32,9 +32,9 @@ from app.domain.models import (
     MonthlyConfig
 )
 from app.domain.services.market_context_engine import MarketContextEngine
-from app.domain.services.capital_engine import CapitalEngine
 from app.domain.services.allocation_engine import AllocationEngine
 from app.domain.services.unit_calculation_engine import UnitCalculationEngine
+from app.utils.time import now_ist_naive
 from app.domain.models import AllocationBlueprint
 
 
@@ -42,12 +42,14 @@ class DecisionEngine:
     """
     Decision Engine - The Brain
     Orchestrates all engines to produce daily decision
+    
+    ✅ FIXED: No longer accesses DB via CapitalEngine
+    ✅ FIXED: CapitalState is passed in as parameter
     """
     
     def __init__(
         self,
         market_context_engine: MarketContextEngine,
-        capital_engine: CapitalEngine,
         allocation_engine: AllocationEngine,
         unit_calculation_engine: UnitCalculationEngine,
         base_allocation: AllocationBlueprint,
@@ -57,9 +59,11 @@ class DecisionEngine:
     ):
         """
         Initialize decision engine with all dependencies
+        
+        ✅ REMOVED: capital_engine (violates pure function rules)
         """
         self.market_context_engine = market_context_engine
-        self.capital_engine = capital_engine
+        # ✅ capital_engine removed - capital state will be passed in
         self.allocation_engine = allocation_engine
         self.unit_calculation_engine = unit_calculation_engine
         self.base_allocation = base_allocation
@@ -72,6 +76,7 @@ class DecisionEngine:
         decision_date: date,
         market_context: MarketContext,
         monthly_config: MonthlyConfig,
+        capital_state: CapitalState,  # ✅ ADDED: Capital state passed in
         current_prices: dict[str, Decimal]
     ) -> Tuple[DailyDecision, List[ETFDecision]]:
         """
@@ -81,13 +86,14 @@ class DecisionEngine:
             decision_date: Date of decision
             market_context: Market environment
             monthly_config: Monthly capital configuration
+            capital_state: Current capital state (✅ PASSED IN, not fetched)
             current_prices: Current ETF prices
         
         Returns:
             Tuple of (DailyDecision, List of ETFDecisions)
         """
-        # Step 1: Get capital state
-        capital_state = self.capital_engine.get_capital_state(monthly_config.month)
+        # Step 1: ✅ Capital state is now passed in (no DB access)
+        # capital_state = self.capital_engine.get_capital_state(monthly_config.month)  # ❌ REMOVED
         
         # Step 2: Determine decision type
         decision_type = self._determine_decision_type(market_context)
@@ -148,7 +154,7 @@ class DecisionEngine:
             remaining_tactical_capital=capital_state.tactical_remaining - tactical_amount,
             explanation=explanation,
             strategy_version=self.strategy_version,
-            created_at=datetime.now()
+            created_at=now_ist_naive()
         )
         
         # Step 10: Create ETFDecisions
@@ -377,7 +383,7 @@ class DecisionEngine:
             remaining_tactical_capital=capital_state.tactical_remaining,
             explanation=explanation,
             strategy_version=self.strategy_version,
-            created_at=datetime.now()
+            created_at=now_ist_naive()
         )
     
     @staticmethod
@@ -405,7 +411,7 @@ class DecisionEngine:
                 actual_amount=plan.actual_amount,
                 status=plan.status,
                 reason=plan.reason,
-                created_at=datetime.now()
+                created_at=now_ist_naive()
             )
             decisions.append(decision)
         

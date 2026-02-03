@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_ENABLED: bool = True
     TELEGRAM_CHAT_ID: str = ""  # Optional
-    
+    API_BASE_URL: str = "http://localhost:8000"
     # Scheduler
     SCHEDULER_ENABLED: bool = True
     DAILY_DECISION_TIME: str = "10:00"

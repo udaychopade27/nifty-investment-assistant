@@ -167,6 +167,18 @@ class UnitCalculationEngine:
         buffer_multiplier = Decimal('1') + (self.price_buffer_pct / Decimal('100'))
         effective = ltp * buffer_multiplier
         return effective.quantize(Decimal('0.01'))
+
+    def calculate_effective_price(self, ltp: Decimal) -> Decimal:
+        """
+        Public wrapper for effective price calculation
+
+        Args:
+            ltp: Last traded price
+
+        Returns:
+            Effective price with buffer added
+        """
+        return self._calculate_effective_price(ltp)
     
     @staticmethod
     def _calculate_floor_units(amount: Decimal, price: Decimal) -> int:
@@ -194,6 +206,19 @@ class UnitCalculationEngine:
         
         # Never negative
         return max(0, units)
+
+    def calculate_units_for_amount(self, amount: Decimal, price: Decimal) -> int:
+        """
+        Public wrapper to calculate whole units for a single amount/price.
+
+        Args:
+            amount: Allocated amount
+            price: Effective price per unit
+
+        Returns:
+            Number of whole units (floored)
+        """
+        return self._calculate_floor_units(amount, price)
     
     def calculate_summary(
         self,

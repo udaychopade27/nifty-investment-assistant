@@ -11,7 +11,7 @@ from .entities import (
     ETFStatus,
     RiskLevel,
     StressLevel,
-    
+
     # Entities
     AllocationBlueprint,
     CapitalState,
@@ -24,7 +24,6 @@ from .entities import (
     ExecutedInvestment,
     MarketContext,
     MonthlyConfig,
-    Portfolio,
     RiskConstraints,
 )
 
@@ -36,7 +35,7 @@ __all__ = [
     "ETFStatus",
     "RiskLevel",
     "StressLevel",
-    
+
     # Entities
     "AllocationBlueprint",
     "CapitalState",
@@ -49,6 +48,5 @@ __all__ = [
     "ExecutedInvestment",
     "MarketContext",
     "MonthlyConfig",
-    "Portfolio",
     "RiskConstraints",
 ]

@@ -1,12 +1,10 @@
 """
-Telegram Bot - COMPLETE IMPLEMENTATION
-All commands fully functional + Set Capital via Telegram
+Telegram Bot - Pure UX Layer (API Client Only)
+No direct database access, no business logic - just API calls
 """
 
 import asyncio
 import logging
-from datetime import date, datetime
-from decimal import Decimal
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,14 +15,9 @@ from telegram.ext import (
     MessageHandler,
     filters
 )
+import httpx
 
 from app.config import settings
-from app.infrastructure.db.database import async_session_factory
-from app.infrastructure.db.repositories.monthly_config_repository import MonthlyConfigRepository
-from app.infrastructure.db.repositories.decision_repository import DailyDecisionRepository, ETFDecisionRepository
-from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
-from app.infrastructure.calendar.nse_calendar import NSECalendar
-from app.domain.services.config_engine import ConfigEngine
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -34,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class ETFTelegramBot:
-    """ETF Assistant Telegram Bot - ALL FEATURES IMPLEMENTED"""
+    """ETF Assistant Telegram Bot - Pure UX Layer"""
     
     def __init__(self):
         """Initialize bot"""
@@ -42,12 +35,94 @@ class ETFTelegramBot:
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN not set in environment")
         
-        self.nse_calendar = NSECalendar()
+        # API base URL (internal Docker network)
+        self.api_base = "http://app:8000"
         
-        # Load config
-        config_dir = Path(__file__).parent.parent.parent / "config"
-        self.config_engine = ConfigEngine(config_dir)
-        self.config_engine.load_all()
+        self.application = None
+    
+    async def api_get(self, endpoint: str):
+        """Make GET request to API"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{self.api_base}{endpoint}", timeout=30.0)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"API GET {endpoint} failed: {e}")
+            raise
+    
+    async def api_post(self, endpoint: str, data: dict):
+        """Make POST request to API"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.api_base}{endpoint}",
+                    json=data,
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"API POST {endpoint} failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"API POST {endpoint} error: {e}")
+            raise
+    
+    async def start_async(self):
+        """Start Telegram bot in async mode (for FastAPI)"""
+        logger.info("🤖 Starting Telegram bot (async mode for FastAPI)...")
+    
+        self.application = Application.builder().token(self.token).build()
+    
+        # Add command handlers
+        self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("menu", self.menu_command))
+        self.application.add_handler(CommandHandler("today", self.today_command))
+        self.application.add_handler(CommandHandler("capital", self.capital_command))
+        self.application.add_handler(CommandHandler("setcapital", self.setcapital_command))
+        self.application.add_handler(CommandHandler("baseplan", self.baseplan_command))  # ✅ NEW
+        self.application.add_handler(CommandHandler("portfolio", self.portfolio_command))
+        self.application.add_handler(CommandHandler("invest", self.invest_command))
+        self.application.add_handler(CommandHandler("etfs", self.etfs_command))
+        self.application.add_handler(CommandHandler("rules", self.rules_command))
+        self.application.add_handler(CommandHandler("allocation", self.allocation_command))
+        self.application.add_handler(CommandHandler("month", self.month_command))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        
+        # Add callback and message handlers
+        self.application.add_handler(CallbackQueryHandler(self.button_callback))
+        self.application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_input)
+        )
+        self.application.add_error_handler(self.error_handler)
+        
+        # Initialize and start
+        await self.application.initialize()
+        await self.application.start()
+        await self.application.updater.start_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+        
+        logger.info("✅ Telegram bot started successfully (async mode)")
+        
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.info("🛑 Telegram bot task cancelled, shutting down...")
+            await self.stop_async()
+            raise
+    
+    async def stop_async(self):
+        """Stop Telegram bot gracefully"""
+        if self.application:
+            logger.info("🛑 Stopping Telegram bot...")
+            await self.application.updater.stop()
+            await self.application.stop()
+            await self.application.shutdown()
+            logger.info("✅ Telegram bot stopped")
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
@@ -56,17 +131,21 @@ class ETFTelegramBot:
 
 I help you invest systematically in Indian ETFs with discipline.
 
+*Capital Model:*
+📊 Base (60%) - Systematic, any day
+⚡ Tactical (40%) - Signal-driven only
+
 *Quick Commands:*
 /menu - Main menu (recommended!)
-/today - Today's decision
-/capital - Monthly capital  
-/setcapital - Set monthly capital (NEW!)
-/portfolio - Your holdings
+/setcapital - Set monthly capital
+/baseplan - See base investment plan 📋
+/today - Today's tactical decision
 /invest - Record executed trade
+/portfolio - Your holdings
 /help - All commands
 
 Let's build wealth together! 📈
-        """
+    """
         await update.message.reply_text(welcome_msg, parse_mode='Markdown')
     
     async def menu_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -77,112 +156,102 @@ Let's build wealth together! 📈
                 InlineKeyboardButton("💰 Set Capital", callback_data='setcapital')
             ],
             [
-                InlineKeyboardButton("📈 Portfolio", callback_data='portfolio'),
+                InlineKeyboardButton("📋 Base Plan", callback_data='baseplan'),  # ✅ NEW
                 InlineKeyboardButton("💸 Invest", callback_data='invest')
             ],
             [
-                InlineKeyboardButton("📋 This Month", callback_data='month'),
-                InlineKeyboardButton("⚙️ ETF Universe", callback_data='etfs')
+                InlineKeyboardButton("📈 Portfolio", callback_data='portfolio'),
+                InlineKeyboardButton("📅 This Month", callback_data='month')
             ],
             [
-                InlineKeyboardButton("📖 Rules", callback_data='rules'),
-                InlineKeyboardButton("📊 Allocation", callback_data='allocation')
+                InlineKeyboardButton("⚙️ ETF Universe", callback_data='etfs'),
+                InlineKeyboardButton("📖 Rules", callback_data='rules')
             ],
             [
+                InlineKeyboardButton("📊 Allocation", callback_data='allocation'),
                 InlineKeyboardButton("❓ Help", callback_data='help')
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
+    
         msg = "🎯 *ETF Assistant Menu*\n\nChoose an option:"
-        
+    
         if update.message:
             await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
         else:
             await update.callback_query.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
     
     async def today_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show today's decision"""
-        async with async_session_factory() as session:
-            repo = DailyDecisionRepository(session)
-            decision = await repo.get_today()
-            
-            if not decision:
-                if not self.nse_calendar.is_trading_day(date.today()):
-                    msg = "❌ *Not a Trading Day*\n\nMarket is closed today."
-                else:
-                    msg = "⏳ *No Decision Yet*\n\nDecision will be generated at 10:00 AM on trading days."
-            else:
-                decision_icon = {
-                    'NONE': '⭕',
-                    'SMALL': '🟡',
-                    'MEDIUM': '🟠',
-                    'FULL': '🔴'
-                }.get(decision.decision_type.value, '⚪')
-                
-                msg = f"""
-{decision_icon} *Decision for {decision.date}*
+        """Show today's decision - API call"""
+        try:
+            decision = await self.api_get("/api/v1/decision/today")
+        
+            decision_icon = {
+                'NONE': '⭕',
+                'SMALL': '🟡',
+                'MEDIUM': '🟠',
+                'FULL': '🔴'
+            }.get(decision.get('decision_type', 'NONE'), '⚪')
+        
+            msg = f"""
+    {decision_icon} *Decision for {decision.get('date')}*
 
-*Type:* {decision.decision_type.value}
-*NIFTY Change:* {decision.nifty_change_pct}%
+    *Type:* {decision.get('decision_type')}
+    *NIFTY Change:* {decision.get('nifty_change_pct')}%
 
-*Investment:*
-💵 Suggested: ₹{decision.suggested_total_amount:,.2f}
-✅ Investable: ₹{decision.actual_investable_amount:,.2f}
-💸 Unused: ₹{decision.unused_amount:,.2f}
+    *Investment:*
+    💵 Suggested: ₹{decision.get('suggested_total_amount', 0):,.2f}
+    ✅ Investable: ₹{decision.get('actual_investable_amount', 0):,.2f}
 
-*Capital Remaining:*
-📊 Base: ₹{decision.remaining_base_capital:,.2f}
-🎯 Tactical: ₹{decision.remaining_tactical_capital:,.2f}
+    *Capital Remaining:*
+    📊 Base: ₹{decision.get('remaining_base_capital', 0):,.2f}
+    🎯 Tactical: ₹{decision.get('remaining_tactical_capital', 0):,.2f}
 
-*Explanation:*
-{decision.explanation}
-
-Use /invest to execute trades manually.
-                """
-            
+    Use /invest to record trades.
+            """
+        
             if update.message:
                 await update.message.reply_text(msg, parse_mode='Markdown')
             else:
-                await update.callback_query.answer()
+                await update.callback_query.answer("Loading...")
+                await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+            
+        except Exception as e:
+            msg = "⏳ *No Decision Yet*\n\nDecision will be generated at 10:00 AM on trading days."
+        
+            if update.message:
+                await update.message.reply_text(msg, parse_mode='Markdown')
+            else:
+                await update.callback_query.answer("No decision")
                 await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
     
     async def capital_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show capital info with option to set if not configured"""
-        async with async_session_factory() as session:
-            repo = MonthlyConfigRepository(session)
-            config = await repo.get_current()
+        """Show capital info - API call"""
+        try:
+            config = await self.api_get("/api/v1/capital/current")
             
-            if config:
-                msg = f"""
+            msg = f"""
 💰 *Current Month Capital*
 
-*Month:* {config.month.strftime('%B %Y')}
-*Total:* ₹{config.monthly_capital:,.2f}
+*Month:* {config.get('month')}
+*Total:* ₹{config.get('monthly_capital', 0):,.2f}
 
 *Split:*
-📊 Base (60%): ₹{config.base_capital:,.2f}
-🎯 Tactical (40%): ₹{config.tactical_capital:,.2f}
+📊 Base (60%): ₹{config.get('base_capital', 0):,.2f}
+🎯 Tactical (40%): ₹{config.get('tactical_capital', 0):,.2f}
 
 *Trading:*
-📅 Trading Days: {config.trading_days}
-💵 Daily Tranche: ₹{config.daily_tranche:,.2f}
+📅 Trading Days: {config.get('trading_days')}
+💵 Daily Tranche: ₹{config.get('daily_tranche', 0):,.2f}
 
-*Strategy:* {config.strategy_version}
-                """
-                
-                # Add button to update capital
-                keyboard = [[InlineKeyboardButton("💰 Update Capital", callback_data='setcapital')]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                if update.message:
-                    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
-                else:
-                    await update.callback_query.answer()
-                    await update.callback_query.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
-            else:
-                # No capital set - prompt to set it
-                msg = """
+*Strategy:* {config.get('strategy_version')}
+            """
+            
+            keyboard = [[InlineKeyboardButton("💰 Update Capital", callback_data='setcapital')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+        except:
+            msg = """
 💰 *Set Monthly Capital*
 
 No capital configured for this month yet!
@@ -190,17 +259,144 @@ No capital configured for this month yet!
 *Let's set it up now!*
 
 Use /setcapital or click the button below.
-                """
-                
-                keyboard = [[InlineKeyboardButton("💰 Set Capital Now", callback_data='setcapital')]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                if update.message:
-                    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
-                else:
-                    await update.callback_query.answer()
-                    await update.callback_query.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+            """
+            keyboard = [[InlineKeyboardButton("💰 Set Capital Now", callback_data='setcapital')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if update.message:
+            await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
     
+    async def baseplan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show base investment plan - API call"""
+        try:
+            # If invoked via button, callback is already answered in button_callback.
+            if update.callback_query:
+                await update.callback_query.message.reply_text(
+                    "⏳ Generating base plan..."
+                )
+
+            # Call API to generate base plan
+            plan = await self.api_post("/api/v1/capital/generate-base-plan", {})
+        
+            # First message - Summary
+            summary_msg = f"""
+📋 *Base Investment Plan*
+
+*Month:* {plan.get('month')}
+*Base Capital:* ₹{plan.get('base_capital', 0):,.2f}
+*Total Allocated:* ₹{plan.get('total_allocated', 0):,.2f}
+*Total Investable:* ₹{plan.get('total_actual', 0):,.2f}
+*Unused:* ₹{plan.get('total_unused', 0):,.2f}
+
+_Loading ETF details..._
+        """
+        
+            if update.message:
+                await update.message.reply_text(summary_msg, parse_mode='Markdown')
+            else:
+                await update.callback_query.message.reply_text(summary_msg, parse_mode='Markdown')
+        
+        # Second message - ETF-wise breakdown (split if too long)
+            base_plan = plan.get('base_plan', {})
+        
+            etf_messages = []
+            current_msg = "*📊 ETF-wise Recommendations:*\n"
+        
+            for etf_symbol, details in sorted(base_plan.items(), 
+                                            key=lambda x: x[1].get('allocated_amount', 0), 
+                                            reverse=True):
+                if details.get('status') == 'price_unavailable':
+                    etf_msg = f"\n*{etf_symbol}:* ❌ Price unavailable\n"
+                else:
+                    allocation_pct = details.get('allocation_pct', 0)
+                    allocated = details.get('allocated_amount', 0)
+                    units = details.get('recommended_units', 0)
+                    ltp = details.get('ltp', 0)
+                    effective_price = details.get('effective_price', 0)
+                    actual_amount = details.get('actual_amount', 0)
+                    unused = details.get('unused', 0)
+                
+                    etf_msg = f"""
+    *{etf_symbol}* ({allocation_pct}%)
+    💵 Allocated: ₹{allocated:,.2f}
+    📊 LTP: ₹{ltp:,.2f}
+    💰 Buy: ₹{effective_price:,.2f}
+    🔢 Units: {units}
+    ✅ Invest: ₹{actual_amount:,.2f}
+                """
+            
+            # Check if adding this would exceed Telegram's limit (4096 chars)
+                if len(current_msg) + len(etf_msg) > 3800:  # Safe margin
+                    etf_messages.append(current_msg)
+                    current_msg = etf_msg
+                else:
+                    current_msg += etf_msg
+        
+            if current_msg:
+                etf_messages.append(current_msg)
+        
+        # Send ETF details (may be multiple messages)
+            for msg in etf_messages:
+                if update.message:
+                    await update.message.reply_text(msg, parse_mode='Markdown')
+                else:
+                    await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+        
+        # Third message - Instructions
+            instructions_msg = f"""
+*📝 How to Execute:*
+
+✅ Execute gradually over the month
+✅ Can invest on any trading day
+✅ Use /invest → Base → Select ETF
+✅ Enter units and executed price
+
+    *Note:* {plan.get('note', 'Base investments are systematic and can be done anytime.')}
+            """
+        
+            if update.message:
+                await update.message.reply_text(instructions_msg, parse_mode='Markdown')
+            else:
+                await update.callback_query.message.reply_text(instructions_msg, parse_mode='Markdown')
+        
+        except httpx.HTTPStatusError as e:
+            try:
+                error_detail = e.response.json().get('detail', 'Unable to generate plan')
+            except:
+                error_detail = 'Unable to generate plan'
+        
+            msg = f"""
+    ❌ *Cannot Generate Base Plan*
+
+    {error_detail}
+
+*Common reasons:*
+- No capital set for current month
+- Market data unavailable
+- System error
+
+Use /setcapital first.
+        """
+        
+            if update.message:
+                await update.message.reply_text(msg, parse_mode='Markdown')
+            else:
+                await update.callback_query.answer("Error!")
+                await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in baseplan_command: {e}")
+            msg = f"❌ Error: {str(e)}\n\nPlease try again."
+        
+            if update.message:
+                await update.message.reply_text(msg)
+            else:
+                await update.callback_query.answer("Error!")
+                await update.callback_query.message.reply_text(msg)
+            
     async def setcapital_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start capital setting flow"""
         msg = """
@@ -223,7 +419,6 @@ The system will automatically:
 Send /cancel to cancel.
         """
         
-        # Set state
         context.user_data['awaiting_capital_amount'] = True
         
         if update.message:
@@ -233,7 +428,7 @@ Send /cancel to cancel.
             await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
     
     async def handle_capital_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle capital amount input"""
+        """Handle capital amount input - API call"""
         if not context.user_data.get('awaiting_capital_amount'):
             return
         
@@ -245,7 +440,6 @@ Send /cancel to cancel.
             return
         
         try:
-            # Parse amount
             amount = float(text.replace(',', ''))
             
             if amount <= 0:
@@ -256,65 +450,36 @@ Send /cancel to cancel.
                 await update.message.reply_text("❌ Minimum capital is ₹1,000. Please enter a higher amount.")
                 return
             
-            # Get current month
-            today = date.today()
-            month_date = date(today.year, today.month, 1)
+            # Call API to set capital
+            result = await self.api_post("/api/v1/capital/set", {
+                "monthly_capital": amount
+            })
             
-            # Calculate splits
-            monthly_capital = Decimal(str(amount))
-            base_capital = (monthly_capital * Decimal('60') / Decimal('100')).quantize(Decimal('0.01'))
-            tactical_capital = (monthly_capital * Decimal('40') / Decimal('100')).quantize(Decimal('0.01'))
-            
-            # Get trading days
-            trading_days = self.nse_calendar.get_trading_days_in_month(month_date)
-            
-            if trading_days == 0:
-                await update.message.reply_text("❌ No trading days in this month!")
-                context.user_data.clear()
-                return
-            
-            # Calculate daily tranche
-            daily_tranche = (base_capital / Decimal(str(trading_days))).quantize(Decimal('0.01'))
-            
-            # Show confirmation
-            confirmation_msg = f"""
-✅ *Capital Configuration Ready*
+            success_msg = f"""
+🎉 *Capital Saved Successfully!*
 
-*Month:* {month_date.strftime('%B %Y')}
-*Total Capital:* ₹{monthly_capital:,.2f}
+*Month:* {result.get('month')}
+*Total:* ₹{result.get('monthly_capital', 0):,.2f}
 
 *Split:*
-📊 Base (60%): ₹{base_capital:,.2f}
-🎯 Tactical (40%): ₹{tactical_capital:,.2f}
+📊 Base: ₹{result.get('base_capital', 0):,.2f}
+🎯 Tactical: ₹{result.get('tactical_capital', 0):,.2f}
 
-*Trading Details:*
-📅 Trading Days: {trading_days}
-💵 Daily Tranche: ₹{daily_tranche:,.2f}
+*Trading:*
+📅 Days: {result.get('trading_days')}
+💵 Daily: ₹{result.get('daily_tranche', 0):,.2f}
 
-*Confirm to save?*
+✅ System is ready to generate daily decisions!
+
+Use /menu to see all options.
             """
             
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ Confirm", callback_data='confirm_capital'),
-                    InlineKeyboardButton("❌ Cancel", callback_data='cancel_capital')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(success_msg, parse_mode='Markdown')
+            context.user_data.clear()
             
-            # Store in context for confirmation
-            context.user_data['capital_data'] = {
-                'month': month_date,
-                'monthly_capital': monthly_capital,
-                'base_capital': base_capital,
-                'tactical_capital': tactical_capital,
-                'trading_days': trading_days,
-                'daily_tranche': daily_tranche
-            }
-            context.user_data['awaiting_capital_amount'] = False
-            
-            await update.message.reply_text(confirmation_msg, reply_markup=reply_markup, parse_mode='Markdown')
-            
+        except httpx.HTTPStatusError as e:
+            error_msg = e.response.json().get('detail', str(e))
+            await update.message.reply_text(f"❌ Error: {error_msg}\n\nPlease try again.")
         except ValueError:
             await update.message.reply_text(
                 "❌ Invalid amount. Please send a number.\n"
@@ -322,102 +487,27 @@ Send /cancel to cancel.
                 "Send /cancel to cancel.",
                 parse_mode='Markdown'
             )
-    
-    async def confirm_capital(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Confirm and save capital to database"""
-        query = update.callback_query
-        await query.answer()
-        
-        capital_data = context.user_data.get('capital_data')
-        
-        if not capital_data:
-            await query.message.edit_text("❌ No capital data found. Please start over with /setcapital")
-            return
-        
-        try:
-            async with async_session_factory() as session:
-                repo = MonthlyConfigRepository(session)
-                
-                # Check if already exists
-                existing = await repo.get_for_month(capital_data['month'])
-                
-                if existing:
-                    await query.message.edit_text(
-                        f"⚠️ Capital already configured for {capital_data['month'].strftime('%B %Y')}.\n\n"
-                        f"Existing: ₹{existing.monthly_capital:,.2f}\n\n"
-                        f"Please delete it via API first to update."
-                    )
-                    context.user_data.clear()
-                    return
-                
-                # Create new config
-                config = await repo.create(
-                    month=capital_data['month'],
-                    monthly_capital=capital_data['monthly_capital'],
-                    base_capital=capital_data['base_capital'],
-                    tactical_capital=capital_data['tactical_capital'],
-                    trading_days=capital_data['trading_days'],
-                    daily_tranche=capital_data['daily_tranche'],
-                    strategy_version=self.config_engine.strategy_version
-                )
-                
-                success_msg = f"""
-🎉 *Capital Saved Successfully!*
-
-*Month:* {config.month.strftime('%B %Y')}
-*Total:* ₹{config.monthly_capital:,.2f}
-
-*Split:*
-📊 Base: ₹{config.base_capital:,.2f}
-🎯 Tactical: ₹{config.tactical_capital:,.2f}
-
-*Trading:*
-📅 Days: {config.trading_days}
-💵 Daily: ₹{config.daily_tranche:,.2f}
-
-✅ System is ready to generate daily decisions!
-
-Use /menu to see all options.
-                """
-                
-                await query.message.edit_text(success_msg, parse_mode='Markdown')
-                
         except Exception as e:
-            logger.error(f"Error saving capital: {e}")
-            await query.message.edit_text(
-                f"❌ Error saving capital: {str(e)}\n\n"
-                "Please try again or contact support."
-            )
-        
-        finally:
+            await update.message.reply_text(f"❌ Error saving capital: {str(e)}")
             context.user_data.clear()
     
-    async def cancel_capital(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Cancel capital setting"""
-        query = update.callback_query
-        await query.answer()
-        
-        await query.message.edit_text("❌ Capital setting cancelled.")
-        context.user_data.clear()
-    
     async def portfolio_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show portfolio holdings"""
-        async with async_session_factory() as session:
-            repo = ExecutedInvestmentRepository(session)
-            holdings = await repo.get_holdings_summary()
+        """Show portfolio holdings - API call"""
+        try:
+            portfolio = await self.api_get("/api/v1/portfolio/summary")
             
-            if not holdings:
-                msg = "📈 *Your Portfolio*\n\nNo investments yet. Start investing when decisions are generated!"
-            else:
-                total_invested = sum(float(h['total_invested']) for h in holdings)
-                
-                msg = f"📈 *Your Portfolio*\n\n*Total Invested:* ₹{total_invested:,.2f}\n\n*Holdings:*\n"
-                
-                for h in holdings:
-                    msg += f"\n{h['etf_symbol']}:\n"
-                    msg += f"  Units: {h['total_units']}\n"
-                    msg += f"  Invested: ₹{h['total_invested']:,.2f}\n"
-                    msg += f"  Avg Price: ₹{h['average_price']:,.2f}\n"
+            msg = f"""
+📈 *Your Portfolio*
+
+*Total Invested:* ₹{portfolio.get('total_invested', 0):,.2f}
+*Current Value:* ₹{portfolio.get('current_value', 0):,.2f}
+*Unrealized P&L:* ₹{portfolio.get('unrealized_pnl', 0):,.2f}
+*P&L %:* {portfolio.get('pnl_percentage', 0):.2f}%
+
+Use /menu for more options.
+            """
+        except:
+            msg = "📈 *Your Portfolio*\n\nNo investments yet. Start investing when decisions are generated!"
         
         if update.message:
             await update.message.reply_text(msg, parse_mode='Markdown')
@@ -426,21 +516,26 @@ Use /menu to see all options.
             await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
     
     async def etfs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show ETF universe"""
-        msg = "⚙️ *ETF Universe*\n\n"
-        
-        for etf in self.config_engine.etf_universe.etfs:
-            icon = {
-                'equity': '📊',
-                'debt': '🏦',
-                'gold': '🥇'
-            }.get(etf.asset_class.value, '💼')
+        """Show ETF universe - API call"""
+        try:
+            etfs = await self.api_get("/api/v1/config/etfs")
             
-            msg += f"{icon} *{etf.symbol}*\n"
-            msg += f"   {etf.name}\n"
-            msg += f"   Type: {etf.asset_class.value.title()}\n"
-            msg += f"   Risk: {etf.risk_level.value.replace('_', '-').title()}\n"
-            msg += f"   Expense: {etf.expense_ratio}%\n\n"
+            msg = "⚙️ *ETF Universe*\n\n"
+            
+            for etf in etfs.get('etfs', []):
+                icon = {
+                    'equity': '📊',
+                    'debt': '🏦',
+                    'gold': '🥇'
+                }.get(etf.get('asset_class'), '💼')
+                
+                msg += f"{icon} *{etf.get('symbol')}*\n"
+                msg += f"   {etf.get('name')}\n"
+                msg += f"   Type: {etf.get('asset_class', '').title()}\n"
+                msg += f"   Risk: {etf.get('risk_level', '').replace('_', '-').title()}\n"
+                msg += f"   Expense: {etf.get('expense_ratio')}%\n\n"
+        except:
+            msg = "⚙️ *ETF Universe*\n\nUnable to load ETFs. Please try again."
         
         if update.message:
             await update.message.reply_text(msg, parse_mode='Markdown')
@@ -449,28 +544,24 @@ Use /menu to see all options.
             await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
     
     async def rules_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show investment rules"""
-        msg = "📖 *Investment Rules*\n\n"
-        
-        # Dip thresholds
-        msg += "*Dip Thresholds:*\n"
-        dip_thresholds = self.config_engine.get_rule('dip_thresholds')
-        for level, rules in dip_thresholds.items():
-            msg += f"\n{level.upper()}:\n"
-            msg += f"  Range: {rules['min_change']}% to {rules['max_change']}%\n"
-            msg += f"  Deploy: {rules['tactical_deployment']}% tactical\n"
-        
-        # Capital split
-        msg += "\n*Capital Split:*\n"
-        capital_rules = self.config_engine.get_rule('capital_rules')
-        msg += f"  Base: {capital_rules['base_percentage']}%\n"
-        msg += f"  Tactical: {capital_rules['tactical_percentage']}%\n"
-        
-        # Risk constraints
-        msg += "\n*Risk Limits:*\n"
-        msg += f"  Max Equity: {self.config_engine.risk_constraints.max_equity_allocation}%\n"
-        msg += f"  Min Debt: {self.config_engine.risk_constraints.min_debt}%\n"
-        msg += f"  Max Single ETF: {self.config_engine.risk_constraints.max_single_etf}%\n"
+        """Show investment rules - API call"""
+        try:
+            rules = await self.api_get("/api/v1/config/rules")
+            
+            msg = "📖 *Investment Rules*\n\n"
+            
+            msg += "*Dip Thresholds:*\n"
+            for level, threshold in rules.get('dip_thresholds', {}).items():
+                msg += f"\n{level.upper()}:\n"
+                msg += f"  Range: {threshold.get('min_change')}% to {threshold.get('max_change')}%\n"
+                msg += f"  Deploy: {threshold.get('tactical_deployment')}% tactical\n"
+            
+            msg += "\n*Capital Split:*\n"
+            capital = rules.get('capital_rules', {})
+            msg += f"  Base: {capital.get('base_percentage')}%\n"
+            msg += f"  Tactical: {capital.get('tactical_percentage')}%\n"
+        except:
+            msg = "📖 *Investment Rules*\n\nUnable to load rules. Please try again."
         
         if update.message:
             await update.message.reply_text(msg, parse_mode='Markdown')
@@ -479,22 +570,26 @@ Use /menu to see all options.
             await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
     
     async def allocation_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show allocation strategy"""
-        msg = "📊 *Allocation Strategy*\n\n"
-        
-        # Base allocation
-        msg += "*Base Allocation (60%):*\n"
-        for etf_symbol, pct in sorted(self.config_engine.base_allocation.allocations.items(), 
-                                       key=lambda x: x[1], reverse=True):
-            if pct > 0:
-                msg += f"  {etf_symbol}: {pct}%\n"
-        
-        # Tactical allocation
-        msg += "\n*Tactical Allocation (40%):*\n"
-        for etf_symbol, pct in sorted(self.config_engine.tactical_allocation.allocations.items(), 
-                                       key=lambda x: x[1], reverse=True):
-            if pct > 0:
-                msg += f"  {etf_symbol}: {pct}%\n"
+        """Show allocation strategy - API call"""
+        try:
+            base_alloc = await self.api_get("/api/v1/config/allocations/base")
+            tactical_alloc = await self.api_get("/api/v1/config/allocations/tactical")
+            
+            msg = "📊 *Allocation Strategy*\n\n"
+            
+            msg += "*Base Allocation (60%):*\n"
+            for symbol, pct in sorted(base_alloc.get('allocations', {}).items(), 
+                                     key=lambda x: x[1], reverse=True):
+                if pct > 0:
+                    msg += f"  {symbol}: {pct}%\n"
+            
+            msg += "\n*Tactical Allocation (40%):*\n"
+            for symbol, pct in sorted(tactical_alloc.get('allocations', {}).items(), 
+                                     key=lambda x: x[1], reverse=True):
+                if pct > 0:
+                    msg += f"  {symbol}: {pct}%\n"
+        except:
+            msg = "📊 *Allocation Strategy*\n\nUnable to load allocation. Please try again."
         
         if update.message:
             await update.message.reply_text(msg, parse_mode='Markdown')
@@ -503,13 +598,25 @@ Use /menu to see all options.
             await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
     
     async def month_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show monthly summary"""
-        async with async_session_factory() as session:
-            month_repo = MonthlyConfigRepository(session)
-            config = await month_repo.get_current()
+        """Show monthly summary - API call"""
+        try:
+            config = await self.api_get("/api/v1/capital/current")
             
-            if not config:
-                msg = """
+            # Get deployed amounts (you'll need to add this endpoint or use existing)
+            msg = f"""
+📋 *Monthly Summary - {config.get('month')}*
+
+*Capital:*
+  Total: ₹{config.get('monthly_capital', 0):,.2f}
+  Base: ₹{config.get('base_capital', 0):,.2f}
+  Tactical: ₹{config.get('tactical_capital', 0):,.2f}
+
+*Trading:*
+  Days: {config.get('trading_days')}
+  Daily Tranche: ₹{config.get('daily_tranche', 0):,.2f}
+            """
+        except:
+            msg = """
 ❌ *No Monthly Configuration*
 
 No capital set for this month yet!
@@ -517,95 +624,140 @@ No capital set for this month yet!
 *Let's set it up!*
 
 Use /setcapital to configure monthly capital.
-                """
-                
-                keyboard = [[InlineKeyboardButton("💰 Set Capital Now", callback_data='setcapital')]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                if update.message:
-                    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
-                else:
-                    await update.callback_query.answer()
-                    await update.callback_query.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+            """
+            
+            keyboard = [[InlineKeyboardButton("💰 Set Capital Now", callback_data='setcapital')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if update.message:
+                await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+                return
             else:
-                inv_repo = ExecutedInvestmentRepository(session)
-                base_deployed = await inv_repo.get_total_base_deployed(config.month)
-                tactical_deployed = await inv_repo.get_total_tactical_deployed(config.month)
-                total_deployed = base_deployed + tactical_deployed
-                
-                msg = f"📋 *Monthly Summary - {config.month.strftime('%B %Y')}*\n\n"
-                msg += f"*Capital:*\n"
-                msg += f"  Total: ₹{config.monthly_capital:,.2f}\n"
-                msg += f"  Base: ₹{config.base_capital:,.2f}\n"
-                msg += f"  Tactical: ₹{config.tactical_capital:,.2f}\n\n"
-                
-                msg += f"*Deployed:*\n"
-                msg += f"  Total: ₹{total_deployed:,.2f}\n"
-                msg += f"  Base: ₹{base_deployed:,.2f}\n"
-                msg += f"  Tactical: ₹{tactical_deployed:,.2f}\n\n"
-                
-                msg += f"*Remaining:*\n"
-                base_remaining = config.base_capital - base_deployed
-                tactical_remaining = config.tactical_capital - tactical_deployed
-                msg += f"  Base: ₹{base_remaining:,.2f}\n"
-                msg += f"  Tactical: ₹{tactical_remaining:,.2f}\n\n"
-                
-                msg += f"*Trading:*\n"
-                msg += f"  Days: {config.trading_days}\n"
-                msg += f"  Daily Tranche: ₹{config.daily_tranche:,.2f}\n"
-                
-                if update.message:
-                    await update.message.reply_text(msg, parse_mode='Markdown')
-                else:
-                    await update.callback_query.answer()
-                    await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+                await update.callback_query.answer()
+                await update.callback_query.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+                return
+        
+        if update.message:
+            await update.message.reply_text(msg, parse_mode='Markdown')
+        else:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
     
     async def invest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Execute trade - Step 1: Select ETF with inline buttons"""
-        # Show ETF buttons
+        """Execute trade - Step 1: Choose Base or Tactical"""
         keyboard = [
             [
-                InlineKeyboardButton("NIFTYBEES", callback_data='invest_NIFTYBEES'),
-                InlineKeyboardButton("JUNIORBEES", callback_data='invest_JUNIORBEES')
-            ],
-            [
-                InlineKeyboardButton("LOWVOLIETF", callback_data='invest_LOWVOLIETF'),
-                InlineKeyboardButton("MIDCAPETF", callback_data='invest_MIDCAPETF')
-            ],
-            [
-                InlineKeyboardButton("BHARATBOND", callback_data='invest_BHARATBOND'),
-                InlineKeyboardButton("GOLDBEES", callback_data='invest_GOLDBEES')
+                InlineKeyboardButton("📊 Base Investment", callback_data='invest_type_base'),
+                InlineKeyboardButton("⚡ Tactical Investment", callback_data='invest_type_tactical')
             ],
             [InlineKeyboardButton("❌ Cancel", callback_data='invest_cancel')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(
-            "💰 *Execute Investment*\n\n"
-            "Select the ETF you executed:",
+        msg = """
+💰 *Record Investment*
+
+*First, choose investment type:*
+
+📊 *Base Investment*
+   • Systematic, SIP-like
+   • Can invest any day
+   • Uses base capital (60%)
+
+⚡ *Tactical Investment*
+   • Signal-driven only
+   • Requires today's decision
+   • Uses tactical capital (40%)
+
+*Which type?*
+        """
+        
+        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def invest_type_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Base/Tactical selection - Step 2: Choose ETF"""
+        query = update.callback_query
+        await query.answer()
+        
+        invest_type = query.data.replace('invest_type_', '')
+        
+        if invest_type == 'cancel':
+            await query.message.edit_text("❌ Investment cancelled.")
+            context.user_data.clear()
+            return
+        
+        context.user_data['invest_bucket'] = invest_type
+        
+        # If tactical, check via API
+        if invest_type == 'tactical':
+            try:
+                allowed = await self.api_get("/api/v1/invest/today/allowed")
+                
+                if not allowed.get('tactical', {}).get('allowed'):
+                    reason = allowed.get('tactical', {}).get('reason', 'Not allowed')
+                    await query.message.edit_text(
+                        f"❌ *Tactical Investment Blocked*\n\n{reason}\n\n"
+                        "You can still execute *Base* investments.",
+                        parse_mode='Markdown'
+                    )
+                    context.user_data.clear()
+                    return
+            except:
+                pass  # Continue anyway
+        
+        # Show ETF selection
+        keyboard = [
+            [
+                InlineKeyboardButton("NIFTYBEES", callback_data='invest_etf_NIFTYBEES'),
+                InlineKeyboardButton("JUNIORBEES", callback_data='invest_etf_JUNIORBEES')
+            ],
+            [
+                InlineKeyboardButton("LOWVOLIETF", callback_data='invest_etf_LOWVOLIETF'),
+                InlineKeyboardButton("MIDCAPETF", callback_data='invest_etf_MIDCAPETF')
+            ],
+            [
+                InlineKeyboardButton("BHARATBOND", callback_data='invest_etf_BHARATBOND'),
+                InlineKeyboardButton("GOLDBEES", callback_data='invest_etf_GOLDBEES')
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data='invest_cancel')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        type_icon = "📊" if invest_type == 'base' else "⚡"
+        
+        await query.message.edit_text(
+            f"{type_icon} *{invest_type.upper()} Investment*\n\n"
+            f"Select the ETF you executed:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
     
     async def invest_etf_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle ETF selection for investment"""
+        """Handle ETF selection - Step 3: Ask for units and price"""
         query = update.callback_query
         await query.answer()
         
-        etf_symbol = query.data.replace('invest_', '')
+        etf_symbol = query.data.replace('invest_etf_', '')
         
         if etf_symbol == 'cancel':
             await query.message.edit_text("❌ Investment cancelled.")
+            context.user_data.clear()
             return
         
         context.user_data['invest_etf'] = etf_symbol
         
+        invest_type = context.user_data.get('invest_bucket', 'base')
+        type_icon = "📊" if invest_type == 'base' else "⚡"
+        
         await query.message.edit_text(
-            f"💰 *Execute {etf_symbol} Investment*\n\n"
-            f"You selected: *{etf_symbol}*\n\n"
+            f"{type_icon} *{invest_type.upper()} Investment*\n"
+            f"*ETF:* {etf_symbol}\n\n"
             f"Now send me:\n"
             f"`units executed_price`\n\n"
-            f"Example: `10 278.50`\n\n"
+            f"*Examples:*\n"
+            f"• `10 278.50` → 10 units @ ₹278.50\n"
+            f"• `5 584.25` → 5 units @ ₹584.25\n"
+            f"• `20 145.80` → 20 units @ ₹145.80\n\n"
             f"(Send /cancel to cancel)",
             parse_mode='Markdown'
         )
@@ -613,7 +765,7 @@ Use /setcapital to configure monthly capital.
         context.user_data['awaiting_invest_details'] = True
     
     async def handle_invest_details(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle units and price input"""
+        """Handle units and price input - API call to save"""
         if not context.user_data.get('awaiting_invest_details'):
             return
         
@@ -642,39 +794,52 @@ Use /setcapital to configure monthly capital.
                 return
             
             etf_symbol = context.user_data.get('invest_etf')
+            bucket = context.user_data.get('invest_bucket', 'base')
+            
+            if not etf_symbol:
+                await update.message.reply_text("❌ Missing ETF symbol. Please start again with /invest")
+                context.user_data.clear()
+                return
+            
             total_amount = units * price
             
-            # Save to database
-            async with async_session_factory() as session:
-                from app.infrastructure.db.models import ExecutedInvestmentModel
-                
-                investment = ExecutedInvestmentModel(
-                    etf_decision_id=1,  # Simplified
-                    etf_symbol=etf_symbol,
-                    units=units,
-                    executed_price=Decimal(str(price)),
-                    total_amount=Decimal(str(total_amount)),
-                    slippage_pct=Decimal('0'),
-                    capital_bucket='base',
-                    executed_at=datetime.now(),
-                    execution_notes=f"Executed via Telegram"
-                )
-                
-                session.add(investment)
-                await session.commit()
+            # Call API to save investment
+            result = await self.api_post(
+                f"/api/v1/invest/{bucket}",
+                {
+                    "etf_symbol": etf_symbol,
+                    "units": units,
+                    "executed_price": price,
+                    "notes": f"Executed via Telegram ({bucket})"
+                }
+            )
+            
+            # Success!
+            type_icon = "📊" if bucket == 'base' else "⚡"
             
             await update.message.reply_text(
-                f"✅ *Investment Recorded!*\n\n"
-                f"ETF: {etf_symbol}\n"
-                f"Units: {units}\n"
-                f"Price: ₹{price:,.2f}\n"
-                f"Total: ₹{total_amount:,.2f}\n\n"
-                f"Recorded in database successfully.",
+                f"✅ *Investment Recorded Successfully!*\n\n"
+                f"*Type:* {type_icon} {bucket.upper()}\n"
+                f"*ETF:* {etf_symbol}\n"
+                f"*Units:* {units}\n"
+                f"*Price:* ₹{price:,.2f}\n"
+                f"*Total:* ₹{total_amount:,.2f}\n\n"
+                f"✅ Saved to database with {bucket} capital bucket.\n\n"
+                f"Use /portfolio to view all holdings.",
                 parse_mode='Markdown'
             )
             
             context.user_data.clear()
             
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.json().get('detail', str(e))
+            await update.message.reply_text(
+                f"❌ *API Error*\n\n"
+                f"{error_detail}\n\n"
+                f"Please check the error and try again.",
+                parse_mode='Markdown'
+            )
+            context.user_data.clear()
         except ValueError as e:
             await update.message.reply_text(
                 f"❌ Invalid input: {e}\n"
@@ -682,15 +847,21 @@ Use /setcapital to configure monthly capital.
                 f"Example: `10 278.50`",
                 parse_mode='Markdown'
             )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ *Failed to save investment*\n\n"
+                f"Error: {str(e)}\n\n"
+                f"The API may be unreachable. Please check logs.",
+                parse_mode='Markdown'
+            )
+            context.user_data.clear()
     
     async def handle_text_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle all text inputs based on current state"""
-        # Check for capital input first
+        """Route text inputs to appropriate handlers"""
         if context.user_data.get('awaiting_capital_amount'):
             await self.handle_capital_input(update, context)
             return
         
-        # Check for invest details
         if context.user_data.get('awaiting_invest_details'):
             await self.handle_invest_details(update, context)
             return
@@ -698,14 +869,15 @@ Use /setcapital to configure monthly capital.
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show help"""
         msg = """
-📖 *ETF Assistant Commands*
+    📖 *ETF Assistant Commands*
 
 *Main Commands:*
 /start - Welcome message
 /menu - Main menu (recommended!)
-/today - Today's investment decision
+/today - Today's decision
 /capital - View monthly capital
 /setcapital - Set monthly capital 💰
+/baseplan - Generate base investment plan 📋
 /portfolio - View holdings
 /month - Monthly summary
 /invest - Record executed trade
@@ -715,15 +887,23 @@ Use /setcapital to configure monthly capital.
 /rules - Investment rules
 /allocation - Allocation strategy
 
-*How It Works:*
+*Investment Flow:*
 1. Set monthly capital with /setcapital
-2. System generates decision daily at 10:00 AM
-3. You review the decision
-4. You execute trades manually
-5. You confirm execution via /invest
-6. System maintains audit trail
+2. View base plan with /baseplan (shows units to buy)
+3. System generates tactical decisions daily at 10:00 AM
+4. Review tactical decision with /today
+5. Execute trades manually in your broker
+6. Record execution via /invest
+7. System maintains complete audit trail
+
+*Capital Model:*
+📊 Base (60%) - Systematic, any day
+   • Use /baseplan to see recommendations
+   • Execute gradually over the month
+⚡ Tactical (40%) - Signal-driven only
+   • Check /today for dip-based signals
         """
-        
+    
         if update.message:
             await update.message.reply_text(msg, parse_mode='Markdown')
         else:
@@ -733,26 +913,32 @@ Use /setcapital to configure monthly capital.
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle button callbacks"""
         query = update.callback_query
-        
-        # Handle capital confirmation
-        if query.data == 'confirm_capital':
-            await self.confirm_capital(update, context)
+
+    # ✅ ALWAYS answer immediately (first line)
+        try:
+            await query.answer()
+        except Exception:
+            pass  # prevents "already answered" edge cases
+
+    # ---- INVEST FLOW ----
+        if query.data.startswith('invest_type_'):
+            await self.invest_type_selected(update, context)
             return
-        
-        if query.data == 'cancel_capital':
-            await self.cancel_capital(update, context)
-            return
-        
-        await query.answer()
-        
-        # Handle invest callbacks
-        if query.data.startswith('invest_'):
+
+        if query.data.startswith('invest_etf_'):
             await self.invest_etf_selected(update, context)
             return
-        
+
+        if query.data == 'invest_cancel':
+            await query.message.edit_text("❌ Investment cancelled.")
+            context.user_data.clear()
+            return
+
+    # ---- MENU HANDLERS ----
         handlers = {
             'today': self.today_command,
             'setcapital': self.setcapital_command,
+            'baseplan': self.baseplan_command,
             'portfolio': self.portfolio_command,
             'invest': lambda u, c: self.invest_button_clicked(u, c),
             'month': self.month_command,
@@ -762,12 +948,11 @@ Use /setcapital to configure monthly capital.
             'help': self.help_command,
             'menu': self.menu_command,
         }
-        
+
         handler = handlers.get(query.data)
         if handler:
             await handler(update, context)
-        else:
-            await query.message.reply_text(f"Feature '{query.data}' coming soon!")
+
     
     async def invest_button_clicked(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle invest button from menu"""
@@ -776,27 +961,30 @@ Use /setcapital to configure monthly capital.
         
         keyboard = [
             [
-                InlineKeyboardButton("NIFTYBEES", callback_data='invest_NIFTYBEES'),
-                InlineKeyboardButton("JUNIORBEES", callback_data='invest_JUNIORBEES')
-            ],
-            [
-                InlineKeyboardButton("LOWVOLIETF", callback_data='invest_LOWVOLIETF'),
-                InlineKeyboardButton("MIDCAPETF", callback_data='invest_MIDCAPETF')
-            ],
-            [
-                InlineKeyboardButton("BHARATBOND", callback_data='invest_BHARATBOND'),
-                InlineKeyboardButton("GOLDBEES", callback_data='invest_GOLDBEES')
+                InlineKeyboardButton("📊 Base Investment", callback_data='invest_type_base'),
+                InlineKeyboardButton("⚡ Tactical Investment", callback_data='invest_type_tactical')
             ],
             [InlineKeyboardButton("❌ Cancel", callback_data='invest_cancel')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.message.reply_text(
-            "💰 *Execute Investment*\n\n"
-            "Select the ETF you executed:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        msg = """
+💰 *Record Investment*
+
+*Choose investment type:*
+
+📊 *Base Investment*
+   • Systematic, SIP-like
+   • Can invest any day
+   • Uses base capital (60%)
+
+⚡ *Tactical Investment*
+   • Signal-driven only
+   • Requires today's decision
+   • Uses tactical capital (40%)
+        """
+        
+        await query.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors"""
@@ -808,17 +996,17 @@ Use /setcapital to configure monthly capital.
             )
     
     def run(self):
-        """Run the bot"""
-        logger.info("Starting Telegram bot...")
-        
+        """Run the bot in standalone mode (blocking)"""
+        logger.info("🤖 Starting Telegram bot (standalone mode)...")
+    
         application = Application.builder().token(self.token).build()
-        
-        # Add ALL command handlers
+    
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("menu", self.menu_command))
         application.add_handler(CommandHandler("today", self.today_command))
         application.add_handler(CommandHandler("capital", self.capital_command))
         application.add_handler(CommandHandler("setcapital", self.setcapital_command))
+        application.add_handler(CommandHandler("baseplan", self.baseplan_command))  # ✅ NEW
         application.add_handler(CommandHandler("portfolio", self.portfolio_command))
         application.add_handler(CommandHandler("invest", self.invest_command))
         application.add_handler(CommandHandler("etfs", self.etfs_command))
@@ -826,24 +1014,16 @@ Use /setcapital to configure monthly capital.
         application.add_handler(CommandHandler("allocation", self.allocation_command))
         application.add_handler(CommandHandler("month", self.month_command))
         application.add_handler(CommandHandler("help", self.help_command))
-        
-        # Add callback query handler
         application.add_handler(CallbackQueryHandler(self.button_callback))
-        
-        # Add message handler for text inputs (capital and invest)
-        application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_input)
-        )
-        
-        # Add error handler
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_input))
         application.add_error_handler(self.error_handler)
         
-        logger.info("✅ Bot started. Press Ctrl+C to stop.")
+        logger.info("✅ Bot started (standalone). Press Ctrl+C to stop.")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 def main():
-    """Main entry point"""
+    """Main entry point for standalone execution"""
     bot = ETFTelegramBot()
     bot.run()
 

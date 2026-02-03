@@ -35,7 +35,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://etf_user:etf_password@db:5432/etf_assistant
       API_HOST: 0.0.0.0
       API_PORT: 8000
-      DEBUG: "False"
+      DEBUG: "True"
       LOG_LEVEL: INFO
       TIMEZONE: Asia/Kolkata
       PRICE_BUFFER_PERCENT: 2.0
@@ -64,6 +64,19 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: etf_frontend
+    depends_on:
+      - app
+    ports:
+      - "3000:3000"
+    networks:
+      - etf_network
+    restart: unless-stopped
 
 volumes:
   postgres_data:
