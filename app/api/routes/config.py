@@ -17,6 +17,7 @@ class ETFInfo(BaseModel):
     category: str
     asset_class: str
     description: str
+    underlying_index: str | None = None
     risk_level: str
     expense_ratio: float
 
@@ -32,6 +33,20 @@ class RulesInfo(BaseModel):
     dip_thresholds: Dict
     price_buffer_percent: float
     strategy_version: str
+
+
+class TradingStatus(BaseModel):
+    trading_enabled: bool
+    trading_base_enabled: bool
+    trading_tactical_enabled: bool
+    simulation_only: bool
+
+
+class TradingUpdate(BaseModel):
+    trading_enabled: bool | None = None
+    trading_base_enabled: bool | None = None
+    trading_tactical_enabled: bool | None = None
+    simulation_only: bool | None = None
 
 
 @router.get("/etfs", response_model=List[ETFInfo])
@@ -52,6 +67,7 @@ async def get_etfs():
             category=etf.category,
             asset_class=etf.asset_class.value,
             description=etf.description,
+            underlying_index=etf.underlying_index,
             risk_level=etf.risk_level.value,
             expense_ratio=float(etf.expense_ratio)
         ))
@@ -122,4 +138,43 @@ async def get_rules():
         dip_thresholds=dip_thresholds,
         price_buffer_percent=price_rules['price_buffer_percent'],
         strategy_version=strategy['version']
+    )
+
+
+@router.get("/trading", response_model=TradingStatus)
+async def get_trading_status():
+    """
+    Get current trading flags (runtime).
+    """
+    from app.config import settings
+
+    return TradingStatus(
+        trading_enabled=settings.TRADING_ENABLED,
+        trading_base_enabled=settings.TRADING_BASE_ENABLED,
+        trading_tactical_enabled=settings.TRADING_TACTICAL_ENABLED,
+        simulation_only=settings.SIMULATION_ONLY,
+    )
+
+
+@router.post("/trading", response_model=TradingStatus)
+async def update_trading_status(update: TradingUpdate):
+    """
+    Update trading flags at runtime (no .env edit required).
+    """
+    from app.config import settings
+
+    if update.trading_enabled is not None:
+        settings.TRADING_ENABLED = update.trading_enabled
+    if update.trading_base_enabled is not None:
+        settings.TRADING_BASE_ENABLED = update.trading_base_enabled
+    if update.trading_tactical_enabled is not None:
+        settings.TRADING_TACTICAL_ENABLED = update.trading_tactical_enabled
+    if update.simulation_only is not None:
+        settings.SIMULATION_ONLY = update.simulation_only
+
+    return TradingStatus(
+        trading_enabled=settings.TRADING_ENABLED,
+        trading_base_enabled=settings.TRADING_BASE_ENABLED,
+        trading_tactical_enabled=settings.TRADING_TACTICAL_ENABLED,
+        simulation_only=settings.SIMULATION_ONLY,
     )

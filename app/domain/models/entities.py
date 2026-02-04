@@ -69,6 +69,7 @@ class ETF:
     category: str
     asset_class: AssetClass
     description: Optional[str]
+    underlying_index: Optional[str]
     exchange: str
     lot_size: int
     is_active: bool

@@ -2,13 +2,25 @@
 # Quickstart Script for ETF Assistant - Unified Version
 # Runs API + Scheduler + Telegram in one container
 
-set -e  # Exit on error
+set -euo pipefail  # Exit on error/undefined vars/pipeline failures
+
+CURRENT_STEP="initializing"
+on_error() {
+  local exit_code=$?
+  echo ""
+  echo "❌ Quickstart failed at step: ${CURRENT_STEP}"
+  echo "   Exit code: ${exit_code}"
+  echo "   Hint: Re-run the script and watch the output above to pinpoint the failure."
+  exit "${exit_code}"
+}
+trap on_error ERR
 
 echo "🚀 ETF Assistant Unified Quickstart"
 echo "===================================="
 echo ""
 
 # Check if Docker is running
+CURRENT_STEP="checking docker"
 if ! docker info > /dev/null 2>&1; then
     echo "❌ Docker is not running. Please start Docker first."
     exit 1
@@ -18,6 +30,7 @@ echo "✅ Docker is running"
 echo ""
 
 # Check if .env exists
+CURRENT_STEP="ensuring .env"
 if [ ! -f .env ]; then
     echo "📝 Creating .env file from template..."
     cp .env.example .env
@@ -29,21 +42,25 @@ else
 fi
 
 # Build and start containers
+CURRENT_STEP="building containers"
 echo "🐳 Building Docker containers..."
 docker-compose build
 
 echo ""
+CURRENT_STEP="starting containers"
 echo "🚀 Starting unified service (API + Scheduler + Telegram)..."
 docker-compose up -d
 
 echo ""
+CURRENT_STEP="waiting for services"
 echo "⏳ Waiting for services to be ready..."
 sleep 15
 
 # Run database migrations
+CURRENT_STEP="running migrations"
 echo "📊 Running database migrations..."
 docker-compose exec -T app alembic upgrade head 2>/dev/null || {
-    echo "⚠️  Alembic migration had issues, creating tables directly..."
+    CURRENT_STEP="fallback init_db"
     docker-compose exec -T app python -c "
 import asyncio
 from app.infrastructure.db.database import init_db
@@ -80,4 +97,5 @@ echo "   - Restart: docker-compose restart app"
 echo "   - Shell access: docker-compose exec app bash"
 echo ""
 echo "📚 Read FINAL_FIXES.md for complete documentation"
-echo ""echo "🚀 Enjoy using ETF Assistant!"
+echo ""
+echo "🚀 Enjoy using ETF Assistant!"

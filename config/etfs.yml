@@ -7,6 +7,7 @@ etfs:
     name: Nippon India ETF Nifty BeES
     category: large_cap
     asset_class: equity
+    underlying_index: NIFTY 50
     description: Tracks Nifty 50 index
     exchange: NSE
     lot_size: 1
@@ -18,6 +19,7 @@ etfs:
     name: Nippon India ETF Junior BeES
     category: growth
     asset_class: equity
+    underlying_index: NIFTY NEXT 50
     description: Tracks Nifty Next 50 index
     exchange: NSE
     lot_size: 1
@@ -25,10 +27,23 @@ etfs:
     risk_level: medium_high
     expense_ratio: 0.28
 
+  - symbol: NIFTY100BEES
+    name: Nippon India ETF Nifty 100
+    category: core_plus
+    asset_class: equity
+    underlying_index: NIFTY 100
+    description: Tracks Nifty 100 index (Large + Upper Mid Cap)
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: medium
+    expense_ratio: 0.20
+
   - symbol: LOWVOLIETF
     name: ICICI Prudential Nifty Low Vol 30 ETF
     category: defensive
     asset_class: equity
+    underlying_index: NIFTY LOW VOLATILITY 30
     description: Low volatility strategy
     exchange: NSE
     lot_size: 1
@@ -36,32 +51,11 @@ etfs:
     risk_level: low_medium
     expense_ratio: 0.25
 
-  - symbol: BHARATBOND
-    name: Bharat Bond ETF April 2031
-    category: debt
-    asset_class: debt
-    description: Government-backed bond ETF
-    exchange: NSE
-    lot_size: 1
-    is_active: true
-    risk_level: low
-    expense_ratio: 0.0005
-
-  - symbol: GOLDBEES
-    name: Nippon India ETF Gold BeES
-    category: commodity
-    asset_class: gold
-    description: Tracks domestic gold prices
-    exchange: NSE
-    lot_size: 1
-    is_active: true
-    risk_level: medium
-    expense_ratio: 1.00
-
   - symbol: MIDCAPETF
     name: ICICI Prudential Nifty Midcap 150 ETF
     category: growth
     asset_class: equity
+    underlying_index: NIFTY MIDCAP 150
     description: Mid-cap index tracking
     exchange: NSE
     lot_size: 1
@@ -69,12 +63,24 @@ etfs:
     risk_level: high
     expense_ratio: 0.25
 
+  - symbol: HDFCGOLD
+    name: HDFC Gold ETF
+    category: commodity
+    asset_class: gold
+    underlying_index: DOMESTIC GOLD PRICE (MCX-linked)
+    description: Physically backed gold ETF
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: medium
+    expense_ratio: 0.25
+
 # ETF Metadata
 metadata:
-  version: "1.0"
-  last_updated: "2025-01-29"
+  version: "1.2"
+  last_updated: "2026-02-04"
   total_etfs: 6
-  
+
 # Exchange Settings
 exchange_settings:
   primary_exchange: NSE

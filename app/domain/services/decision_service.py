@@ -45,7 +45,8 @@ class DecisionService:
         monthly_config_repo: MonthlyConfigRepository,
         daily_decision_repo: DailyDecisionRepository,
         etf_decision_repo: ETFDecisionRepository,
-        etf_symbols: List[str]
+        etf_symbols: List[str],
+        etf_index_map: Optional[dict[str, str]] = None
     ):
         """Initialize decision service with all dependencies"""
         self.decision_engine = decision_engine
@@ -57,6 +58,7 @@ class DecisionService:
         self.daily_decision_repo = daily_decision_repo
         self.etf_decision_repo = etf_decision_repo
         self.etf_symbols = etf_symbols
+        self.etf_index_map = etf_index_map or {}
     
     async def generate_today_decision(self) -> Tuple[DailyDecision, List[ETFDecision]]:
         """
@@ -153,14 +155,25 @@ class DecisionService:
         
         logger.info(f"✅ Fetched prices for {len(current_prices)} ETFs")
         
-        # Step 6: ✅ Generate decision (passing capital_state)
+        # Step 6: Fetch underlying index changes (for tactical dip logic)
+        index_changes_by_etf: dict[str, Decimal] = {}
+        for symbol, index_name in self.etf_index_map.items():
+            if not index_name:
+                continue
+            change = await self.market_data_provider.get_index_daily_change(index_name, decision_date)
+            if change is not None:
+                index_changes_by_etf[symbol] = change
+
+        # Step 7: ✅ Generate decision (passing capital_state)
         logger.info("🎯 Generating decision...")
         daily_decision, etf_decisions = self.decision_engine.generate_decision(
             decision_date=decision_date,
             market_context=market_context,
             monthly_config=monthly_config,
             capital_state=capital_state,  # ✅ Passed in
-            current_prices=current_prices
+            current_prices=current_prices,
+            index_changes_by_etf=index_changes_by_etf,
+            deploy_base_daily=False
         )
         
         logger.info(f"✅ Decision: {daily_decision.decision_type.value}, Amount: ₹{daily_decision.actual_investable_amount:,.2f}")

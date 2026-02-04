@@ -245,6 +245,18 @@ Define your ETF universe
 ### `config/allocations.yml`
 Set base and tactical allocations
 
+### Updating ETFs For Investments
+When you add, remove, or rename ETFs, update all of the following so the system stays in sync:
+- `config/etfs.yml` add the ETF entry (symbol, name, asset_class, risk_level, etc.).
+- `config/allocations.yml` add the symbol under `base_allocation`, `tactical_allocation`, and `crash_allocation` (and ensure each group sums to 100).
+- `config/allocations.yml` update `single_etf_limits` if you want per-ETF caps reflected for the new symbol.
+- Telegram invest flow reads ETFs from the API, so no code changes are needed after updating the YAML files.
+
+After edits, restart the services so the config reloads:
+```bash
+docker-compose restart
+```
+
 ### `config/rules.yml`
 Configure dip thresholds and constraints
 

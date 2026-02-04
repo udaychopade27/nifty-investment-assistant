@@ -36,6 +36,7 @@ from app.domain.services.unit_calculation_engine import UnitCalculationEngine
 from app.domain.services.decision_engine import DecisionEngine
 from app.domain.services.decision_service import DecisionService
 from app.infrastructure.db.models import DailyDecisionModel, ETFDecisionModel, MonthlySummaryModel
+from app.utils.notifications import send_telegram_message
 
 # Set process timezone to IST for logging
 os.environ["TZ"] = "Asia/Kolkata"
@@ -56,9 +57,14 @@ class TelegramNotifier:
     async def send_decision_notification(decision, etf_decisions):
         """Send decision notification to Telegram"""
         try:
-            # Implementation would use telegram bot API
-            # For now, just log
-            logger.info(f"📱 Telegram: Decision notification sent")
+            message = (
+                f"📊 Decision: {decision.decision_type.value}\n"
+                f"Date: {decision.date}\n"
+                f"Suggested: ₹{decision.suggested_total_amount:,.2f}\n"
+                f"Investable: ₹{decision.actual_investable_amount:,.2f}\n"
+                f"ETFs: {len(etf_decisions)}"
+            )
+            await send_telegram_message(message)
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {e}")
     
@@ -66,7 +72,7 @@ class TelegramNotifier:
     async def send_monthly_reminder():
         """Send monthly capital reminder"""
         try:
-            logger.info(f"📱 Telegram: Monthly capital reminder sent")
+            await send_telegram_message("🗓️ Monthly capital reminder: please set capital for this month.")
         except Exception as e:
             logger.error(f"Failed to send reminder: {e}")
     
@@ -74,7 +80,7 @@ class TelegramNotifier:
     async def send_monthly_summary(summary_text):
         """Send monthly summary to Telegram"""
         try:
-            logger.info(f"📱 Telegram: Monthly summary sent")
+            await send_telegram_message(summary_text)
         except Exception as e:
             logger.error(f"Failed to send summary: {e}")
 
@@ -94,7 +100,7 @@ class ETFScheduler:
         self.notifier = TelegramNotifier()
         
         # Load configuration
-        config_dir = Path(__file__).parent.parent.parent / "config"
+        config_dir = Path(__file__).resolve().parents[2] / "config"
         self.config_engine = ConfigEngine(config_dir)
         self.config_engine.load_all()
         
@@ -161,6 +167,11 @@ class ETFScheduler:
                 market_context_engine = MarketContextEngine()
                 
                 etf_dict = {etf.symbol: etf for etf in self.config_engine.etf_universe.etfs}
+                etf_index_map = {
+                    etf.symbol: etf.underlying_index
+                    for etf in self.config_engine.etf_universe.etfs
+                    if etf.underlying_index
+                }
                 allocation_engine = AllocationEngine(
                     risk_constraints=self.config_engine.risk_constraints,
                     etf_universe=etf_dict
@@ -195,7 +206,8 @@ class ETFScheduler:
                     monthly_config_repo=monthly_config_repo,
                     daily_decision_repo=daily_decision_repo,
                     etf_decision_repo=etf_decision_repo,
-                    etf_symbols=etf_symbols
+                    etf_symbols=etf_symbols,
+                    etf_index_map=etf_index_map
                 )
                 
                 logger.info("✅ DecisionService initialized")
@@ -217,6 +229,10 @@ class ETFScheduler:
             logger.error(f"❌ Daily decision job failed: {e}")
             import traceback
             traceback.print_exc()
+            try:
+                await send_telegram_message(f"❌ Daily decision job failed: {e}")
+            except Exception:
+                pass
     
     async def monthly_plan_job(self):
         """
@@ -437,24 +453,24 @@ class ETFScheduler:
     def start(self):
         """Start the scheduler"""
         logger.info("🚀 Starting ETF Assistant Scheduler...")
-        
-        # For testing purposes, run every 5 minutes
+
+        # Daily decision at configured time (default 15:15 IST)
+        try:
+            decision_hour, decision_minute = settings.DAILY_DECISION_TIME.split(":")
+        except ValueError:
+            decision_hour, decision_minute = "15", "15"
+
         self.scheduler.add_job(
             self.daily_decision_job,
-            CronTrigger(minute="*/5"),
+            CronTrigger(
+                hour=int(decision_hour),
+                minute=int(decision_minute),
+                day_of_week='mon-fri'
+            ),
             id="daily_decision",
-            name="Daily Decision Generation (5 min test)",
+            name="Daily Decision Generation",
             replace_existing=True
         )
-        
-        # In production, use this instead:
-        # self.scheduler.add_job(
-        #     self.daily_decision_job,
-        #     CronTrigger(hour=10, minute=0, day_of_week='mon-fri'),
-        #     id='daily_decision',
-        #     name='Daily Decision Generation',
-        #     replace_existing=True
-        # )
         
         # Monthly plan job (last day of month, 9:00 AM)
         self.scheduler.add_job(

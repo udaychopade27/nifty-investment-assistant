@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 
 // API Configuration
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = '';
 
 // Utility Components
 const Card = ({ children, className = '' }) => (
@@ -125,8 +125,8 @@ class APIService {
     return this.get('/api/v1/portfolio/holdings');
   }
   
-  static getPerformance() {
-    return this.get('/api/v1/portfolio/performance');
+  static getPnl() {
+    return this.get('/api/v1/portfolio/pnl');
   }
   
   // Config APIs

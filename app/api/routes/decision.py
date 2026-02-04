@@ -18,6 +18,7 @@ from app.infrastructure.db.repositories.decision_repository import (
 )
 from app.infrastructure.db.repositories.monthly_config_repository import MonthlyConfigRepository
 from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
+from app.infrastructure.db.repositories.extra_capital_repository import ExtraCapitalRepository
 from app.utils.time import now_ist_naive
 from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
 from app.infrastructure.calendar.nse_calendar import NSECalendar
@@ -28,6 +29,7 @@ from app.domain.services.unit_calculation_engine import UnitCalculationEngine
 from app.domain.services.decision_engine import DecisionEngine
 from app.domain.services.config_engine import ConfigEngine
 from pathlib import Path
+from app.utils.notifications import send_telegram_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -83,8 +85,19 @@ async def get_today_decision(db: AsyncSession = Depends(get_db)):
             detail="No decision for today. Check if it's a trading day or decision hasn't been generated yet."
         )
     
-    # Get ETF decisions - would need proper ID management in production
-    etf_decisions = []
+    etf_models = await etf_repo.get_for_daily_decision(decision.id)
+    etf_decisions = [
+        ETFDecisionResponse(
+            etf_symbol=e.etf_symbol,
+            ltp=float(e.ltp),
+            effective_price=float(e.effective_price),
+            units=int(e.units),
+            actual_amount=float(e.actual_amount),
+            status=e.status.value,
+            reason=e.reason
+        )
+        for e in etf_models
+    ]
     
     return DailyDecisionResponse(
         date=decision.date.isoformat(),
@@ -273,7 +286,7 @@ async def generate_decision(
             )
         
         # Load configuration
-        config_dir = Path(__file__).parent.parent.parent / "config"
+        config_dir = Path(__file__).resolve().parents[3] / "config"
         config_engine = ConfigEngine(config_dir)
         config_engine.load_all()
         
@@ -302,24 +315,17 @@ async def generate_decision(
         
         # Get capital state
         inv_repo = ExecutedInvestmentRepository(db)
-        base_deployed = await inv_repo.get_total_base_deployed(month)
-        tactical_deployed = await inv_repo.get_total_tactical_deployed(month)
-        extra_deployed = await inv_repo.get_total_extra_deployed(month)
-        
-        capital_engine = CapitalEngine()
-        capital_state = capital_engine.get_capital_state_from_deployed(
-            month,
-            monthly_config.base_capital,
-            monthly_config.tactical_capital,
-            base_deployed,
-            tactical_deployed,
-            extra_deployed
+        extra_repo = ExtraCapitalRepository(db)
+        capital_engine = CapitalEngine(
+            monthly_config_repo=month_repo,
+            executed_investment_repo=inv_repo,
+            extra_capital_repo=extra_repo,
         )
+        capital_state = await capital_engine.get_capital_state(monthly_config.month)
         
         # Create decision engine
         decision_engine_inst = DecisionEngine(
             market_context_engine=market_context_engine,
-            capital_engine=capital_engine,
             allocation_engine=allocation_engine,
             unit_calculation_engine=unit_engine,
             base_allocation=config_engine.base_allocation,
@@ -355,12 +361,27 @@ async def generate_decision(
         etf_symbols = [etf.symbol for etf in config_engine.etf_universe.etfs if etf.is_active]
         current_prices = await market_provider.get_prices_for_date(etf_symbols, today)
         
+        # Fetch underlying index changes for tactical filtering
+        etf_index_map = {
+            etf.symbol: etf.underlying_index
+            for etf in config_engine.etf_universe.etfs
+            if etf.underlying_index
+        }
+        index_changes_by_etf = {}
+        for symbol, index_name in etf_index_map.items():
+            change = await market_provider.get_index_daily_change(index_name, today)
+            if change is not None:
+                index_changes_by_etf[symbol] = change
+
         # Generate decision
         daily_decision, etf_decisions = decision_engine_inst.generate_decision(
             decision_date=today,
             market_context=market_context,
             monthly_config=monthly_config,
-            current_prices=current_prices
+            capital_state=capital_state,
+            current_prices=current_prices,
+            index_changes_by_etf=index_changes_by_etf,
+            deploy_base_daily=False
         )
         
         # Save to database (simplified - would need proper ID management)
@@ -383,6 +404,10 @@ async def generate_decision(
         raise
     except Exception as e:
         logger.error(f"Error generating decision: {e}")
+        try:
+            await send_telegram_message(f"❌ Decision generation failed: {e}")
+        except Exception:
+            pass
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate decision: {str(e)}"

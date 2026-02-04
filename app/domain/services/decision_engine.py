@@ -77,7 +77,9 @@ class DecisionEngine:
         market_context: MarketContext,
         monthly_config: MonthlyConfig,
         capital_state: CapitalState,  # ✅ ADDED: Capital state passed in
-        current_prices: dict[str, Decimal]
+        current_prices: dict[str, Decimal],
+        index_changes_by_etf: Optional[dict[str, Decimal]] = None,
+        deploy_base_daily: bool = True
     ) -> Tuple[DailyDecision, List[ETFDecision]]:
         """
         Generate complete daily decision
@@ -88,6 +90,8 @@ class DecisionEngine:
             monthly_config: Monthly capital configuration
             capital_state: Current capital state (✅ PASSED IN, not fetched)
             current_prices: Current ETF prices
+            index_changes_by_etf: Optional map of ETF -> underlying index daily % change
+            deploy_base_daily: Whether to deploy base capital in daily decision
         
         Returns:
             Tuple of (DailyDecision, List of ETFDecisions)
@@ -95,14 +99,22 @@ class DecisionEngine:
         # Step 1: ✅ Capital state is now passed in (no DB access)
         # capital_state = self.capital_engine.get_capital_state(monthly_config.month)  # ❌ REMOVED
         
-        # Step 2: Determine decision type
-        decision_type = self._determine_decision_type(market_context)
+        # Step 2: Determine decision type (prefer per-ETF index dips if provided)
+        if index_changes_by_etf:
+            decision_type, tactical_deploy_pct = self._determine_decision_type_from_index_changes(
+                index_changes_by_etf
+            )
+        else:
+            decision_type = self._determine_decision_type(market_context)
+            tactical_deploy_pct = None
         
         # Step 3: Calculate deployable amounts
         base_amount, tactical_amount = self._calculate_deployable_amounts(
             decision_type,
             capital_state,
-            monthly_config
+            monthly_config,
+            tactical_deploy_pct=tactical_deploy_pct,
+            deploy_base_daily=deploy_base_daily
         )
         
         suggested_total = base_amount + tactical_amount
@@ -118,7 +130,8 @@ class DecisionEngine:
         # Step 5: Allocate to ETFs
         allocations = self._allocate_capital(
             base_amount,
-            tactical_amount
+            tactical_amount,
+            index_changes_by_etf=index_changes_by_etf
         )
         
         # Step 6: Calculate units
@@ -196,7 +209,9 @@ class DecisionEngine:
         self,
         decision_type: DecisionType,
         capital_state: CapitalState,
-        monthly_config: MonthlyConfig
+        monthly_config: MonthlyConfig,
+        tactical_deploy_pct: Optional[Decimal] = None,
+        deploy_base_daily: bool = True
     ) -> Tuple[Decimal, Decimal]:
         """
         Calculate base and tactical amounts to deploy
@@ -210,19 +225,24 @@ class DecisionEngine:
             Tuple of (base_amount, tactical_amount)
         """
         # Base amount (always invest if capital remaining)
-        base_amount = min(
-            monthly_config.daily_tranche,
-            capital_state.base_remaining
-        )
+        base_amount = Decimal('0')
+        if deploy_base_daily:
+            base_amount = min(
+                monthly_config.daily_tranche,
+                capital_state.base_remaining
+            )
         
         # Tactical amount based on decision type
         tactical_pct = Decimal('0')
-        if decision_type == DecisionType.SMALL:
-            tactical_pct = Decimal('25')
-        elif decision_type == DecisionType.MEDIUM:
-            tactical_pct = Decimal('50')
-        elif decision_type == DecisionType.FULL:
-            tactical_pct = Decimal('100')
+        if tactical_deploy_pct is not None:
+            tactical_pct = tactical_deploy_pct
+        else:
+            if decision_type == DecisionType.SMALL:
+                tactical_pct = Decimal('25')
+            elif decision_type == DecisionType.MEDIUM:
+                tactical_pct = Decimal('50')
+            elif decision_type == DecisionType.FULL:
+                tactical_pct = Decimal('100')
         
         tactical_amount = Decimal('0')
         if tactical_pct > Decimal('0'):
@@ -236,7 +256,8 @@ class DecisionEngine:
     def _allocate_capital(
         self,
         base_amount: Decimal,
-        tactical_amount: Decimal
+        tactical_amount: Decimal,
+        index_changes_by_etf: Optional[dict[str, Decimal]] = None
     ) -> List[ETFAllocation]:
         """
         Allocate base and tactical capital to ETFs
@@ -258,11 +279,11 @@ class DecisionEngine:
             )
             all_allocations.extend(base_allocs)
         
-        # Allocate tactical capital
+        # Allocate tactical capital (filter by dipped ETFs if provided)
         if tactical_amount > Decimal('0'):
-            tactical_allocs, _ = self.allocation_engine.allocate(
+            tactical_allocs = self._allocate_tactical_filtered(
                 tactical_amount,
-                self.tactical_allocation
+                index_changes_by_etf
             )
             all_allocations.extend(tactical_allocs)
         
@@ -270,6 +291,115 @@ class DecisionEngine:
         merged = self._merge_allocations(all_allocations)
         
         return merged
+
+    def _allocate_tactical_filtered(
+        self,
+        tactical_amount: Decimal,
+        index_changes_by_etf: Optional[dict[str, Decimal]]
+    ) -> List[ETFAllocation]:
+        """
+        Allocate tactical capital only to ETFs whose underlying index dipped.
+        Falls back to full tactical allocation if no filter provided.
+        """
+        if not index_changes_by_etf:
+            tactical_allocs, _ = self.allocation_engine.allocate(
+                tactical_amount,
+                self.tactical_allocation
+            )
+            return tactical_allocs
+
+        eligible = []
+        for symbol, change in index_changes_by_etf.items():
+            tier = self._get_dip_tier(change)
+            if tier != "none":
+                eligible.append(symbol)
+
+        if not eligible:
+            return []
+
+        base_weights = {
+            symbol: Decimal(str(pct))
+            for symbol, pct in self.tactical_allocation.allocations.items()
+            if symbol in eligible and Decimal(str(pct)) > Decimal('0')
+        }
+        total_weight = sum(base_weights.values())
+        if total_weight <= Decimal('0'):
+            return []
+
+        normalized = {}
+        running_sum = Decimal('0')
+        items = list(base_weights.items())
+        for idx, (symbol, weight) in enumerate(items):
+            if idx == len(items) - 1:
+                pct = (Decimal('100') - running_sum).quantize(Decimal('0.01'))
+            else:
+                pct = (weight / total_weight * Decimal('100')).quantize(Decimal('0.01'))
+                running_sum += pct
+            if pct < Decimal('0'):
+                pct = Decimal('0')
+            normalized[symbol] = pct
+
+        tactical_blueprint = AllocationBlueprint(
+            name="tactical_filtered",
+            allocations=normalized
+        )
+        tactical_allocs, _ = self.allocation_engine.allocate(
+            tactical_amount,
+            tactical_blueprint
+        )
+        return tactical_allocs
+
+    def _determine_decision_type_from_index_changes(
+        self,
+        index_changes_by_etf: dict[str, Decimal]
+    ) -> Tuple[DecisionType, Decimal]:
+        """
+        Determine decision type based on worst underlying index dip.
+        Returns (DecisionType, tactical_deploy_pct).
+        """
+        changes = [c for c in index_changes_by_etf.values() if c is not None]
+        if not changes:
+            return DecisionType.NONE, Decimal('0')
+
+        worst_change = min(changes)  # most negative
+        tier = self._get_dip_tier(worst_change)
+
+        if tier == "full":
+            return DecisionType.FULL, self._get_tactical_deploy_pct("full")
+        if tier == "medium":
+            return DecisionType.MEDIUM, self._get_tactical_deploy_pct("medium")
+        if tier == "small":
+            return DecisionType.SMALL, self._get_tactical_deploy_pct("small")
+        return DecisionType.NONE, Decimal('0')
+
+    def _get_dip_tier(self, change_pct: Decimal) -> str:
+        """
+        Map a % change to dip tier using configured thresholds.
+        """
+        full_cfg = self.dip_thresholds.get('full', {})
+        med_cfg = self.dip_thresholds.get('medium', {})
+        small_cfg = self.dip_thresholds.get('small', {})
+
+        full_max = full_cfg.get('max_change')
+        med_min = med_cfg.get('min_change')
+        med_max = med_cfg.get('max_change')
+        small_min = small_cfg.get('min_change')
+        small_max = small_cfg.get('max_change')
+
+        if full_max is not None and change_pct <= Decimal(str(full_max)):
+            return "full"
+        if med_min is not None and med_max is not None:
+            if Decimal(str(med_min)) < change_pct <= Decimal(str(med_max)):
+                return "medium"
+        if small_min is not None and small_max is not None:
+            if Decimal(str(small_min)) < change_pct <= Decimal(str(small_max)):
+                return "small"
+        return "none"
+
+    def _get_tactical_deploy_pct(self, tier: str) -> Decimal:
+        cfg = self.dip_thresholds.get(tier, {})
+        pct = cfg.get('tactical_deployment', 0)
+        return Decimal(str(pct))
     
     @staticmethod
     def _merge_allocations(

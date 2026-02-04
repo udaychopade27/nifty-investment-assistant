@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # Investment settings
     PRICE_BUFFER_PERCENT: float = 2.0
     MIN_INVESTMENT_AMOUNT: float = 100.0
+
+    # Trading controls
+    TRADING_ENABLED: bool = True
+    TRADING_BASE_ENABLED: bool = True
+    TRADING_TACTICAL_ENABLED: bool = True
+    SIMULATION_ONLY: bool = False
     
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = ""
@@ -33,7 +39,7 @@ class Settings(BaseSettings):
     API_BASE_URL: str = "http://localhost:8000"
     # Scheduler
     SCHEDULER_ENABLED: bool = True
-    DAILY_DECISION_TIME: str = "10:00"
+    DAILY_DECISION_TIME: str = "15:15"
     MONTHLY_SUMMARY_TIME: str = "18:00"
     
     class Config:

@@ -8,22 +8,22 @@ import {
 } from 'lucide-react';
 
 // API Configuration
-const API_BASE_URL = '';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 // Utility Components
 const Card = ({ children, className = '' }) => (
-  <div className={`bg-white rounded-xl shadow-sm border border-gray-100 ${className}`}>
+  <div className={`bg-[var(--card)] rounded-2xl shadow-sm border border-[var(--line)] ${className}`}>
     {children}
   </div>
 );
 
 const Button = ({ children, variant = 'primary', size = 'md', onClick, disabled, className = '' }) => {
   const variants = {
-    primary: 'bg-indigo-600 hover:bg-indigo-700 text-white',
-    secondary: 'bg-gray-100 hover:bg-gray-200 text-gray-900',
-    success: 'bg-green-600 hover:bg-green-700 text-white',
-    danger: 'bg-red-600 hover:bg-red-700 text-white',
-    outline: 'border-2 border-indigo-600 text-indigo-600 hover:bg-indigo-50'
+    primary: 'bg-primary-600 hover:bg-primary-700 text-white',
+    secondary: 'bg-white/70 hover:bg-white text-ink-0 border border-[var(--line)]',
+    success: 'bg-emerald-600 hover:bg-emerald-700 text-white',
+    danger: 'bg-rose-600 hover:bg-rose-700 text-white',
+    outline: 'border-2 border-primary-600 text-primary-700 hover:bg-primary-50'
   };
   
   const sizes = {
@@ -50,11 +50,11 @@ const Button = ({ children, variant = 'primary', size = 'md', onClick, disabled,
 
 const Badge = ({ children, variant = 'default' }) => {
   const variants = {
-    default: 'bg-gray-100 text-gray-800',
-    success: 'bg-green-100 text-green-800',
-    warning: 'bg-yellow-100 text-yellow-800',
-    danger: 'bg-red-100 text-red-800',
-    info: 'bg-blue-100 text-blue-800'
+    default: 'bg-stone-100 text-stone-800',
+    success: 'bg-emerald-100 text-emerald-800',
+    warning: 'bg-amber-100 text-amber-900',
+    danger: 'bg-rose-100 text-rose-800',
+    info: 'bg-sky-100 text-sky-800'
   };
   
   return (
@@ -125,8 +125,8 @@ class APIService {
     return this.get('/api/v1/portfolio/holdings');
   }
   
-  static getPerformance() {
-    return this.get('/api/v1/portfolio/performance');
+  static getPnl() {
+    return this.get('/api/v1/portfolio/pnl');
   }
   
   // Config APIs
@@ -149,37 +149,37 @@ class APIService {
 // Dashboard Header Component
 const DashboardHeader = ({ user = 'Investor', onMenuClick }) => {
   return (
-    <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
+    <header className="glass sticky top-0 z-50 border-b border-white/60">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
           <div className="flex items-center space-x-4">
             <button onClick={onMenuClick} className="lg:hidden">
-              <Menu className="h-6 w-6 text-gray-600" />
+              <Menu className="h-6 w-6 text-ink-1" />
             </button>
             <div className="flex items-center space-x-3">
-              <div className="bg-indigo-600 p-2 rounded-lg">
+              <div className="bg-primary-600 p-2 rounded-xl shadow-sm">
                 <TrendingUp className="h-6 w-6 text-white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-gray-900">ETF Assistant</h1>
-                <p className="text-xs text-gray-500">Disciplined Indian ETF Investing</p>
+                <h1 className="text-xl font-bold text-ink-0 title-font">ETF Assistant</h1>
+                <p className="text-xs text-ink-1/70">Disciplined Indian ETF Investing</p>
               </div>
             </div>
           </div>
           
           <div className="flex items-center space-x-4">
-            <button className="p-2 hover:bg-gray-100 rounded-lg relative">
-              <Bell className="h-5 w-5 text-gray-600" />
+            <button className="p-2 hover:bg-white/60 rounded-lg relative">
+              <Bell className="h-5 w-5 text-ink-1" />
               <span className="absolute top-1 right-1 h-2 w-2 bg-red-500 rounded-full"></span>
             </button>
-            <button className="p-2 hover:bg-gray-100 rounded-lg">
-              <Settings className="h-5 w-5 text-gray-600" />
+            <button className="p-2 hover:bg-white/60 rounded-lg">
+              <Settings className="h-5 w-5 text-ink-1" />
             </button>
-            <div className="hidden sm:flex items-center space-x-2 bg-gray-100 px-3 py-2 rounded-lg">
-              <div className="h-8 w-8 bg-indigo-600 rounded-full flex items-center justify-center text-white font-medium">
+            <div className="hidden sm:flex items-center space-x-2 bg-white/70 px-3 py-2 rounded-lg border border-white/60">
+              <div className="h-8 w-8 bg-primary-600 rounded-full flex items-center justify-center text-white font-medium">
                 {user[0]}
               </div>
-              <span className="text-sm font-medium text-gray-700">{user}</span>
+              <span className="text-sm font-medium text-ink-1">{user}</span>
             </div>
           </div>
         </div>
@@ -232,22 +232,22 @@ const TodayDecision = ({ decision, onInvest }) => {
       <Card className="p-6">
         <div className="flex items-center space-x-3 mb-4">
           <Clock className="h-5 w-5 text-gray-400" />
-          <h2 className="text-lg font-semibold text-gray-900">Today's Decision</h2>
+          <h2 className="text-lg font-semibold text-ink-0">Today's Decision</h2>
         </div>
         <div className="text-center py-8">
           <Activity className="h-12 w-12 text-gray-300 mx-auto mb-3" />
-          <p className="text-gray-600">No decision generated yet</p>
-          <p className="text-sm text-gray-500 mt-1">Decision will be generated at 10:00 AM</p>
+          <p className="text-ink-1/80">No decision generated yet</p>
+          <p className="text-sm text-ink-1/60 mt-1">Decision will be generated at 10:00 AM</p>
         </div>
       </Card>
     );
   }
   
   const decisionIcons = {
-    'NONE': { icon: Minus, color: 'gray', bg: 'bg-gray-100', text: 'text-gray-600' },
-    'SMALL': { icon: TrendingDown, color: 'yellow', bg: 'bg-yellow-100', text: 'text-yellow-600' },
-    'MEDIUM': { icon: TrendingDown, color: 'orange', bg: 'bg-orange-100', text: 'text-orange-600' },
-    'FULL': { icon: TrendingDown, color: 'red', bg: 'bg-red-100', text: 'text-red-600' }
+    'NONE': { icon: Minus, color: 'gray', bg: 'bg-stone-100', text: 'text-stone-600' },
+    'SMALL': { icon: TrendingDown, color: 'amber', bg: 'bg-amber-100', text: 'text-amber-700' },
+    'MEDIUM': { icon: TrendingDown, color: 'orange', bg: 'bg-orange-100', text: 'text-orange-700' },
+    'FULL': { icon: TrendingDown, color: 'red', bg: 'bg-rose-100', text: 'text-rose-700' }
   };
   
   const decisionType = decision.decision_type || 'NONE';
@@ -257,8 +257,8 @@ const TodayDecision = ({ decision, onInvest }) => {
     <Card className="p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-3">
-          <Target className="h-5 w-5 text-indigo-600" />
-          <h2 className="text-lg font-semibold text-gray-900">Today's Decision</h2>
+          <Target className="h-5 w-5 text-primary-600" />
+          <h2 className="text-lg font-semibold text-ink-0">Today's Decision</h2>
         </div>
         <Badge variant={decisionType === 'NONE' ? 'default' : 'warning'}>
           {decision.date}
@@ -270,42 +270,42 @@ const TodayDecision = ({ decision, onInvest }) => {
           <div className="flex items-center space-x-3">
             <Icon className={`h-8 w-8 ${text}`} />
             <div>
-              <p className="text-sm font-medium text-gray-600">Decision Type</p>
+            <p className="text-sm font-medium text-ink-1/70">Decision Type</p>
               <p className={`text-xl font-bold ${text}`}>{decisionType}</p>
             </div>
           </div>
           <div className="text-right">
-            <p className="text-sm font-medium text-gray-600">NIFTY Change</p>
+            <p className="text-sm font-medium text-ink-1/70">NIFTY Change</p>
             <p className={`text-xl font-bold ${text}`}>{decision.nifty_change_pct}%</p>
           </div>
         </div>
         
         <div className="grid grid-cols-2 gap-4">
-          <div className="bg-blue-50 p-4 rounded-lg">
-            <p className="text-sm text-gray-600 mb-1">Suggested Amount</p>
-            <p className="text-lg font-bold text-gray-900">₹{decision.suggested_total_amount?.toLocaleString()}</p>
+          <div className="bg-sky-50 p-4 rounded-lg">
+            <p className="text-sm text-ink-1/70 mb-1">Suggested Amount</p>
+            <p className="text-lg font-bold text-ink-0">₹{decision.suggested_total_amount?.toLocaleString()}</p>
           </div>
-          <div className="bg-green-50 p-4 rounded-lg">
-            <p className="text-sm text-gray-600 mb-1">Investable</p>
-            <p className="text-lg font-bold text-green-600">₹{decision.actual_investable_amount?.toLocaleString()}</p>
+          <div className="bg-emerald-50 p-4 rounded-lg">
+            <p className="text-sm text-ink-1/70 mb-1">Investable</p>
+            <p className="text-lg font-bold text-emerald-700">₹{decision.actual_investable_amount?.toLocaleString()}</p>
           </div>
         </div>
         
         <div className="border-t pt-4">
-          <p className="text-sm font-medium text-gray-700 mb-2">Capital Remaining</p>
+          <p className="text-sm font-medium text-ink-1 mb-2">Capital Remaining</p>
           <div className="flex justify-between items-center text-sm">
-            <span className="text-gray-600">📊 Base:</span>
+            <span className="text-ink-1/70">📊 Base:</span>
             <span className="font-medium">₹{decision.remaining_base_capital?.toLocaleString()}</span>
           </div>
           <div className="flex justify-between items-center text-sm mt-1">
-            <span className="text-gray-600">⚡ Tactical:</span>
+            <span className="text-ink-1/70">⚡ Tactical:</span>
             <span className="font-medium">₹{decision.remaining_tactical_capital?.toLocaleString()}</span>
           </div>
         </div>
         
         {decision.explanation && (
-          <div className="bg-gray-50 p-3 rounded-lg">
-            <p className="text-sm text-gray-700">{decision.explanation}</p>
+          <div className="bg-stone-50 p-3 rounded-lg">
+            <p className="text-sm text-ink-1/80">{decision.explanation}</p>
           </div>
         )}
         
@@ -327,7 +327,7 @@ const CapitalOverview = ({ capital, onSetCapital, onViewBasePlan }) => {
       <Card className="p-6">
         <div className="text-center py-8">
           <Wallet className="h-12 w-12 text-gray-300 mx-auto mb-3" />
-          <p className="text-gray-600 mb-4">No capital configured</p>
+          <p className="text-ink-1/80 mb-4">No capital configured</p>
           <Button variant="primary" onClick={onSetCapital}>
             <Plus className="h-4 w-4 mr-2 inline" />
             Set Monthly Capital
@@ -341,47 +341,55 @@ const CapitalOverview = ({ capital, onSetCapital, onViewBasePlan }) => {
     <Card className="p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-3">
-          <Wallet className="h-5 w-5 text-indigo-600" />
-          <h2 className="text-lg font-semibold text-gray-900">Capital Overview</h2>
+          <Wallet className="h-5 w-5 text-primary-600" />
+          <h2 className="text-lg font-semibold text-ink-0">Capital Overview</h2>
         </div>
         <Badge variant="info">{capital.month}</Badge>
       </div>
       
       <div className="space-y-4">
-        <div className="bg-gradient-to-br from-indigo-50 to-blue-50 p-4 rounded-lg">
-          <p className="text-sm text-gray-600 mb-1">Total Monthly Capital</p>
-          <p className="text-3xl font-bold text-gray-900">₹{capital.monthly_capital?.toLocaleString()}</p>
+        <div className="bg-gradient-to-br from-primary-50 to-amber-50 p-4 rounded-lg">
+          <p className="text-sm text-ink-1/70 mb-1">Total Monthly Capital</p>
+          <p className="text-3xl font-bold text-ink-0">₹{capital.monthly_capital?.toLocaleString()}</p>
         </div>
         
         <div className="grid grid-cols-2 gap-3">
-          <div className="bg-blue-50 p-3 rounded-lg">
+          <div className="bg-sky-50 p-3 rounded-lg">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-gray-600">Base (60%)</span>
-              <Shield className="h-4 w-4 text-blue-600" />
+              <span className="text-xs text-ink-1/70">Base (60%)</span>
+              <Shield className="h-4 w-4 text-sky-600" />
             </div>
-            <p className="text-lg font-bold text-gray-900">₹{capital.base_capital?.toLocaleString()}</p>
-            <p className="text-xs text-gray-500 mt-1">Systematic investing</p>
+            <p className="text-lg font-bold text-ink-0">₹{capital.base_capital?.toLocaleString()}</p>
+            <p className="text-xs text-ink-1/60 mt-1">Systematic investing</p>
           </div>
           
-          <div className="bg-purple-50 p-3 rounded-lg">
+          <div className="bg-amber-50 p-3 rounded-lg">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-gray-600">Tactical (40%)</span>
-              <Zap className="h-4 w-4 text-purple-600" />
+              <span className="text-xs text-ink-1/70">Tactical (40%)</span>
+              <Zap className="h-4 w-4 text-amber-600" />
             </div>
-            <p className="text-lg font-bold text-gray-900">₹{capital.tactical_capital?.toLocaleString()}</p>
-            <p className="text-xs text-gray-500 mt-1">Signal-driven</p>
+            <p className="text-lg font-bold text-ink-0">₹{capital.tactical_capital?.toLocaleString()}</p>
+            <p className="text-xs text-ink-1/60 mt-1">Signal-driven</p>
           </div>
         </div>
         
         <div className="border-t pt-3 space-y-2 text-sm">
           <div className="flex justify-between">
-            <span className="text-gray-600">Trading Days:</span>
+            <span className="text-ink-1/70">Trading Days:</span>
             <span className="font-medium">{capital.trading_days}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-600">Daily Tranche:</span>
+            <span className="text-ink-1/70">Daily Tranche:</span>
             <span className="font-medium">₹{capital.daily_tranche?.toLocaleString()}</span>
           </div>
+          {capital.carry_forward_applied && (
+            <div className="flex justify-between">
+              <span className="text-ink-1/70">Carry Forward:</span>
+              <span className="font-medium">
+                ₹{((capital.carry_forward_base || 0) + (capital.carry_forward_tactical || 0)).toLocaleString()}
+              </span>
+            </div>
+          )}
         </div>
         
         <div className="grid grid-cols-2 gap-2">
@@ -418,8 +426,8 @@ const PortfolioSummary = ({ portfolio }) => {
     <Card className="p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-3">
-          <PieChart className="h-5 w-5 text-indigo-600" />
-          <h2 className="text-lg font-semibold text-gray-900">Portfolio</h2>
+          <PieChart className="h-5 w-5 text-primary-600" />
+          <h2 className="text-lg font-semibold text-ink-0">Portfolio</h2>
         </div>
         <Button variant="secondary" size="sm">
           <ExternalLink className="h-4 w-4" />
@@ -428,20 +436,20 @@ const PortfolioSummary = ({ portfolio }) => {
       
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-4">
-          <div className="bg-gray-50 p-4 rounded-lg">
-            <p className="text-sm text-gray-600 mb-1">Total Invested</p>
-            <p className="text-xl font-bold text-gray-900">₹{portfolio.total_invested?.toLocaleString()}</p>
+          <div className="bg-stone-50 p-4 rounded-lg">
+            <p className="text-sm text-ink-1/70 mb-1">Total Invested</p>
+            <p className="text-xl font-bold text-ink-0">₹{portfolio.total_invested?.toLocaleString()}</p>
           </div>
-          <div className="bg-blue-50 p-4 rounded-lg">
-            <p className="text-sm text-gray-600 mb-1">Current Value</p>
-            <p className="text-xl font-bold text-blue-600">₹{portfolio.current_value?.toLocaleString()}</p>
+          <div className="bg-sky-50 p-4 rounded-lg">
+            <p className="text-sm text-ink-1/70 mb-1">Current Value</p>
+            <p className="text-xl font-bold text-sky-700">₹{portfolio.current_value?.toLocaleString()}</p>
           </div>
         </div>
         
         <div className={`p-4 rounded-lg ${pnlPositive ? 'bg-green-50' : 'bg-red-50'}`}>
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-gray-600 mb-1">Unrealized P&L</p>
+              <p className="text-sm text-ink-1/70 mb-1">Unrealized P&L</p>
               <p className={`text-2xl font-bold ${pnlPositive ? 'text-green-600' : 'text-red-600'}`}>
                 {pnlPositive ? '+' : ''}₹{portfolio.unrealized_pnl?.toLocaleString()}
               </p>
@@ -453,6 +461,19 @@ const PortfolioSummary = ({ portfolio }) => {
             </div>
           </div>
         </div>
+        {portfolio.realized_pnl !== undefined && portfolio.realized_pnl !== null && (
+          <div className="bg-amber-50 p-4 rounded-lg">
+            <p className="text-sm text-ink-1/70 mb-1">Realized P&L</p>
+            <p className="text-xl font-bold text-amber-700">
+              {portfolio.realized_pnl >= 0 ? '+' : ''}₹{portfolio.realized_pnl?.toLocaleString()}
+            </p>
+          </div>
+        )}
+        {portfolio.prices_missing && portfolio.prices_missing.length > 0 && (
+          <div className="text-xs text-ink-1/70">
+            Prices missing for: {portfolio.prices_missing.join(", ")}
+          </div>
+        )}
       </div>
     </Card>
   );
@@ -505,7 +526,7 @@ const SetCapitalModal = ({ isOpen, onClose, onSubmit }) => {
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="50000"
-                className="w-full pl-8 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                className="w-full pl-8 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
               />
             </div>
             <p className="text-sm text-gray-500 mt-2">Minimum: ₹1,000</p>
@@ -554,7 +575,7 @@ const BasePlanModal = ({ isOpen, onClose, plan }) => {
         
         {plan ? (
           <div className="space-y-4">
-            <div className="bg-gradient-to-br from-indigo-50 to-blue-50 p-4 rounded-lg">
+            <div className="bg-gradient-to-br from-primary-50 to-amber-50 p-4 rounded-lg">
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
                   <p className="text-gray-600">Base Capital</p>
@@ -574,14 +595,14 @@ const BasePlanModal = ({ isOpen, onClose, plan }) => {
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center space-x-2">
                       <h5 className="font-bold text-gray-900">{symbol}</h5>
-                      <Badge variant="default">{details.allocation_pct}%</Badge>
+                      <Badge variant="default">{details.allocation_pct ?? 0}%</Badge>
                     </div>
-                    {details.status === 'price_unavailable' && (
+                    {(!details.ltp || details.status === 'price_unavailable') && (
                       <Badge variant="danger">Price N/A</Badge>
                     )}
                   </div>
                   
-                  {details.status !== 'price_unavailable' && (
+                  {!!details.ltp && details.status !== 'price_unavailable' && (
                     <div className="grid grid-cols-3 gap-3 text-sm mt-3">
                       <div>
                         <p className="text-gray-600">LTP</p>
@@ -589,7 +610,7 @@ const BasePlanModal = ({ isOpen, onClose, plan }) => {
                       </div>
                       <div>
                         <p className="text-gray-600">Units</p>
-                        <p className="font-medium text-indigo-600">{details.recommended_units}</p>
+                        <p className="font-medium text-primary-600">{details.recommended_units}</p>
                       </div>
                       <div>
                         <p className="text-gray-600">Amount</p>
@@ -640,7 +661,7 @@ const ETFDashboard = () => {
     try {
       const [capitalData, portfolioData] = await Promise.all([
         APIService.getCapital().catch(() => null),
-        APIService.getPortfolioSummary().catch(() => null)
+        APIService.getPnl().catch(() => null)
       ]);
       
       setCapital(capitalData);
@@ -669,7 +690,17 @@ const ETFDashboard = () => {
     setShowBasePlanModal(true);
     try {
       const plan = await APIService.generateBasePlan();
-      setBasePlan(plan);
+      const entries = Object.values(plan.base_plan || {});
+      const totals = entries.reduce(
+        (acc, item) => {
+          acc.total_allocated += item.allocated_amount || 0;
+          acc.total_actual += item.actual_amount || 0;
+          acc.total_unused += item.unused || 0;
+          return acc;
+        },
+        { total_allocated: 0, total_actual: 0, total_unused: 0 }
+      );
+      setBasePlan({ ...plan, ...totals });
     } catch (error) {
       alert(error.message);
       setShowBasePlanModal(false);
@@ -678,20 +709,20 @@ const ETFDashboard = () => {
   
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
-          <RefreshCw className="h-12 w-12 text-indigo-600 mx-auto mb-4 animate-spin" />
-          <p className="text-gray-600">Loading dashboard...</p>
+          <RefreshCw className="h-12 w-12 text-primary-600 mx-auto mb-4 animate-spin" />
+          <p className="text-ink-1/80">Loading dashboard...</p>
         </div>
       </div>
     );
   }
   
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen">
       <DashboardHeader onMenuClick={() => setMobileMenuOpen(!mobileMenuOpen)} />
       
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 fade-in">
         {/* Quick Stats */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <StatsCard
@@ -732,7 +763,7 @@ const ETFDashboard = () => {
             
             {/* Quick Actions */}
             <Card className="p-6">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h3>
+              <h3 className="text-lg font-semibold text-ink-0 mb-4">Quick Actions</h3>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <Button variant="outline" size="sm" className="flex flex-col items-center py-4">
                   <Shield className="h-5 w-5 mb-2" />

@@ -135,7 +135,7 @@ class TestMarketContextEngine:
         """Test dip day detection - is dip"""
         context = engine.calculate_context(
             calc_date=date(2025, 1, 29),
-            nifty_close=Decimal('21780'),
+            nifty_close=Decimal('21750'),
             nifty_previous_close=Decimal('22000'),
             last_3_day_closes=[Decimal('22000')],
             india_vix=None

@@ -139,6 +139,29 @@ class ExecutedInvestmentModel(Base):
     )
 
 
+class ExecutedSellModel(Base):
+    """Sell executions (audit records)"""
+    __tablename__ = "executed_sell"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    etf_symbol = Column(String(20), nullable=False, index=True)
+
+    units = Column(Integer, nullable=False)
+    sell_price = Column(Numeric(10, 2), nullable=False)
+    total_amount = Column(Numeric(12, 2), nullable=False)
+    realized_pnl = Column(Numeric(12, 2), nullable=False)
+
+    capital_bucket = Column(String(20), nullable=False)  # base, tactical, extra
+
+    sold_at = Column(DateTime, nullable=False, default=now_ist_naive)
+    sell_notes = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index('ix_executed_sell_date', 'sold_at'),
+        Index('ix_executed_sell_etf', 'etf_symbol', 'sold_at'),
+    )
+
+
 class ExtraCapitalInjectionModel(Base):
     """Extra capital injections (crash opportunities)"""
     __tablename__ = "extra_capital_injection"

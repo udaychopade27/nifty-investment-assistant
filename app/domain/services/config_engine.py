@@ -89,6 +89,7 @@ class ConfigEngine:
                 category=etf_data['category'],
                 asset_class=AssetClass(etf_data['asset_class']),
                 description=etf_data['description'],
+                underlying_index=etf_data.get('underlying_index'),
                 exchange=etf_data['exchange'],
                 lot_size=etf_data['lot_size'],
                 is_active=etf_data['is_active'],

@@ -19,10 +19,13 @@ from app.infrastructure.db.repositories.decision_repository import (
 from app.infrastructure.db.repositories.investment_repository import (
     ExecutedInvestmentRepository,
 )
+from app.infrastructure.db.repositories.sell_repository import ExecutedSellRepository
 from app.infrastructure.db.repositories.monthly_config_repository import (
     MonthlyConfigRepository,
 )
 from app.infrastructure.db.models import ExecutedInvestmentModel
+from app.utils.notifications import send_telegram_message
+from app.config import settings
 from app.utils.time import now_ist_naive
 
 logger = logging.getLogger(__name__)
@@ -46,6 +49,15 @@ class TacticalInvestmentRequest(BaseModel):
     etf_symbol: str = Field(..., description="ETF symbol (e.g., NIFTYBEES)")
     units: int = Field(..., gt=0)
     executed_price: float = Field(..., gt=0)
+    notes: Optional[str] = None
+
+
+class SellInvestmentRequest(BaseModel):
+    capital_bucket: Literal["base", "tactical", "extra"] = "base"
+    etf_symbol: str = Field(..., description="ETF symbol (e.g., NIFTYBEES)")
+    units: int = Field(..., gt=0)
+    sell_price: float = Field(..., gt=0)
+    sold_date: Optional[str] = Field(None, description="YYYY-MM-DD (default: now)")
     notes: Optional[str] = None
 
 
@@ -77,6 +89,15 @@ async def execute_base_investment(
     - Cannot exceed BASE capital
     - No decision required
     """
+
+    if not settings.TRADING_ENABLED or not settings.TRADING_BASE_ENABLED:
+        await send_telegram_message(
+            "🚫 Base investment blocked: trading is disabled by configuration."
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Base trading is disabled by configuration.",
+        )
 
     total_amount = Decimal(str(request.units)) * Decimal(str(request.executed_price))
 
@@ -110,6 +131,10 @@ async def execute_base_investment(
         )
 
     # 3️⃣ Record investment
+    execution_notes = request.notes or "Base investment via API"
+    if settings.SIMULATION_ONLY:
+        execution_notes = f"SIMULATION | {execution_notes}"
+
     investment = ExecutedInvestmentModel(
         etf_decision_id=None,
         etf_symbol=request.etf_symbol,
@@ -119,7 +144,7 @@ async def execute_base_investment(
         slippage_pct=Decimal("0"),
         capital_bucket="base",
         executed_at=now_ist_naive(),
-        execution_notes=request.notes or "Base investment via API",
+        execution_notes=execution_notes,
     )
 
     db.add(investment)
@@ -157,6 +182,15 @@ async def execute_tactical_investment(
     - Today's decision MUST exist and not NONE
     - Cannot exceed TACTICAL capital
     """
+
+    if not settings.TRADING_ENABLED or not settings.TRADING_TACTICAL_ENABLED:
+        await send_telegram_message(
+            "🚫 Tactical investment blocked: trading is disabled by configuration."
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Tactical trading is disabled by configuration.",
+        )
 
     total_amount = Decimal(str(request.units)) * Decimal(str(request.executed_price))
     today = date.today()
@@ -205,6 +239,10 @@ async def execute_tactical_investment(
         )
 
     # 4️⃣ Record investment
+    execution_notes = request.notes or f"Tactical investment (Decision: {daily_decision.decision_type.value})"
+    if settings.SIMULATION_ONLY:
+        execution_notes = f"SIMULATION | {execution_notes}"
+
     investment = ExecutedInvestmentModel(
         etf_decision_id=daily_decision.id,
         etf_symbol=request.etf_symbol,
@@ -214,8 +252,7 @@ async def execute_tactical_investment(
         slippage_pct=Decimal("0"),
         capital_bucket="tactical",
         executed_at=now_ist_naive(),
-        execution_notes=request.notes
-        or f"Tactical investment (Decision: {daily_decision.decision_type.value})",
+        execution_notes=execution_notes,
     )
 
     db.add(investment)
@@ -236,6 +273,71 @@ async def execute_tactical_investment(
         executed_at=investment.executed_at.isoformat(),
         decision_linked=True,
     )
+
+
+# ------------------------------------------------------------------
+# SELL INVESTMENT
+# ------------------------------------------------------------------
+
+@router.post("/sell")
+async def execute_sell(
+    request: SellInvestmentRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Record a manual sell and realized PnL (average cost).
+    """
+    sold_at = now_ist_naive()
+    if request.sold_date:
+        try:
+            year, month, day = map(int, request.sold_date.split("-"))
+            sold_at = sold_at.replace(year=year, month=month, day=day)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid sold_date format. Use YYYY-MM-DD")
+
+    inv_repo = ExecutedInvestmentRepository(db)
+    sell_repo = ExecutedSellRepository(db)
+
+    holdings = await inv_repo.get_holdings_summary()
+    buy = next((h for h in holdings if h["etf_symbol"] == request.etf_symbol), None)
+    if not buy:
+        raise HTTPException(status_code=400, detail="No buys found for this ETF")
+
+    total_units_bought = int(buy["total_units"])
+    total_invested = Decimal(str(buy["total_invested"]))
+
+    total_units_sold = await sell_repo.get_total_units_sold(request.etf_symbol)
+    available_units = total_units_bought - total_units_sold
+
+    if request.units > available_units:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient units to sell. Available: {available_units}"
+        )
+
+    avg_cost = (total_invested / Decimal(str(total_units_bought))).quantize(Decimal("0.01"))
+    sell_price = Decimal(str(request.sell_price)).quantize(Decimal("0.01"))
+    total_amount = (sell_price * Decimal(str(request.units))).quantize(Decimal("0.01"))
+    realized_pnl = ((sell_price - avg_cost) * Decimal(str(request.units))).quantize(Decimal("0.01"))
+
+    sell_id = await sell_repo.create(
+        etf_symbol=request.etf_symbol,
+        units=request.units,
+        sell_price=sell_price,
+        total_amount=total_amount,
+        realized_pnl=realized_pnl,
+        capital_bucket=request.capital_bucket,
+        sold_at=sold_at,
+        sell_notes=request.notes
+    )
+
+    return {
+        "status": "success",
+        "message": f"✅ Sell recorded for {request.etf_symbol}",
+        "sell_id": sell_id,
+        "realized_pnl": float(realized_pnl),
+        "avg_cost_used": float(avg_cost)
+    }
 
 
 # ------------------------------------------------------------------

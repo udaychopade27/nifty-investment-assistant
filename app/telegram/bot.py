@@ -88,6 +88,7 @@ class ETFTelegramBot:
         self.application.add_handler(CommandHandler("rules", self.rules_command))
         self.application.add_handler(CommandHandler("allocation", self.allocation_command))
         self.application.add_handler(CommandHandler("month", self.month_command))
+        self.application.add_handler(CommandHandler("tradingstatus", self.trading_status_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         
         # Add callback and message handlers
@@ -170,6 +171,9 @@ Let's build wealth together! 📈
             [
                 InlineKeyboardButton("📊 Allocation", callback_data='allocation'),
                 InlineKeyboardButton("❓ Help", callback_data='help')
+            ],
+            [
+                InlineKeyboardButton("🚦 Trading Status", callback_data='tradingstatus')
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -209,6 +213,18 @@ Let's build wealth together! 📈
 
     Use /invest to record trades.
             """
+
+            etf_decisions = decision.get('etf_decisions', [])
+            if etf_decisions:
+                etf_msg = "*📌 Tactical ETF Suggestions:*\n"
+                for etf in etf_decisions:
+                    etf_msg += (
+                        f"\n*{etf.get('etf_symbol')}*\n"
+                        f"  🔢 Units: {etf.get('units')}\n"
+                        f"  💰 Price: ₹{etf.get('effective_price')}\n"
+                        f"  ✅ Amount: ₹{etf.get('actual_amount')}\n"
+                    )
+                msg = msg + "\n\n" + etf_msg
         
             if update.message:
                 await update.message.reply_text(msg, parse_mode='Markdown')
@@ -217,7 +233,7 @@ Let's build wealth together! 📈
                 await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
             
         except Exception as e:
-            msg = "⏳ *No Decision Yet*\n\nDecision will be generated at 10:00 AM on trading days."
+            msg = "⏳ *No Decision Yet*\n\nDecision will be generated at 3:15 PM on trading days."
         
             if update.message:
                 await update.message.reply_text(msg, parse_mode='Markdown')
@@ -518,11 +534,17 @@ Use /menu for more options.
     async def etfs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show ETF universe - API call"""
         try:
-            etfs = await self.api_get("/api/v1/config/etfs")
+            etfs_payload = await self.api_get("/api/v1/config/etfs")
+            if isinstance(etfs_payload, list):
+                etfs_list = etfs_payload
+            elif isinstance(etfs_payload, dict):
+                etfs_list = etfs_payload.get('etfs', [])
+            else:
+                etfs_list = []
             
             msg = "⚙️ *ETF Universe*\n\n"
             
-            for etf in etfs.get('etfs', []):
+            for etf in etfs_list:
                 icon = {
                     'equity': '📊',
                     'debt': '🏦',
@@ -534,6 +556,9 @@ Use /menu for more options.
                 msg += f"   Type: {etf.get('asset_class', '').title()}\n"
                 msg += f"   Risk: {etf.get('risk_level', '').replace('_', '-').title()}\n"
                 msg += f"   Expense: {etf.get('expense_ratio')}%\n\n"
+            
+            if not etfs_list:
+                msg += "No ETFs configured yet. Update `config/etfs.yml` and try again."
         except:
             msg = "⚙️ *ETF Universe*\n\nUnable to load ETFs. Please try again."
         
@@ -591,6 +616,27 @@ Use /menu for more options.
         except:
             msg = "📊 *Allocation Strategy*\n\nUnable to load allocation. Please try again."
         
+        if update.message:
+            await update.message.reply_text(msg, parse_mode='Markdown')
+        else:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+
+    async def trading_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show trading status flags - API call"""
+        try:
+            status = await self.api_get("/api/v1/config/trading")
+
+            msg = (
+                "🚦 *Trading Status*\n\n"
+                f"*Trading Enabled:* {status.get('trading_enabled')}\n"
+                f"*Base Enabled:* {status.get('trading_base_enabled')}\n"
+                f"*Tactical Enabled:* {status.get('trading_tactical_enabled')}\n"
+                f"*Simulation Only:* {status.get('simulation_only')}\n"
+            )
+        except Exception:
+            msg = "🚦 *Trading Status*\n\nUnable to load status. Please try again."
+
         if update.message:
             await update.message.reply_text(msg, parse_mode='Markdown')
         else:
@@ -705,23 +751,43 @@ Use /setcapital to configure monthly capital.
             except:
                 pass  # Continue anyway
         
-        # Show ETF selection
-        keyboard = [
-            [
-                InlineKeyboardButton("NIFTYBEES", callback_data='invest_etf_NIFTYBEES'),
-                InlineKeyboardButton("JUNIORBEES", callback_data='invest_etf_JUNIORBEES')
-            ],
-            [
-                InlineKeyboardButton("LOWVOLIETF", callback_data='invest_etf_LOWVOLIETF'),
-                InlineKeyboardButton("MIDCAPETF", callback_data='invest_etf_MIDCAPETF')
-            ],
-            [
-                InlineKeyboardButton("BHARATBOND", callback_data='invest_etf_BHARATBOND'),
-                InlineKeyboardButton("GOLDBEES", callback_data='invest_etf_GOLDBEES')
-            ],
-            [InlineKeyboardButton("❌ Cancel", callback_data='invest_cancel')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Show ETF selection (dynamic from API)
+        try:
+            etfs_payload = await self.api_get("/api/v1/config/etfs")
+            if isinstance(etfs_payload, list):
+                etfs_list = etfs_payload
+            elif isinstance(etfs_payload, dict):
+                etfs_list = etfs_payload.get('etfs', [])
+            else:
+                etfs_list = []
+        except Exception:
+            etfs_list = []
+        
+        if not etfs_list:
+            await query.message.edit_text(
+                "⚠️ *No ETFs Available*\n\n"
+                "Please check `config/etfs.yml` and try again.",
+                parse_mode='Markdown'
+            )
+            context.user_data.clear()
+            return
+        
+        buttons = []
+        row = []
+        for etf in etfs_list:
+            symbol = etf.get('symbol')
+            if not symbol:
+                continue
+            row.append(InlineKeyboardButton(symbol, callback_data=f"invest_etf_{symbol}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        
+        if row:
+            buttons.append(row)
+        
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data='invest_cancel')])
+        reply_markup = InlineKeyboardMarkup(buttons)
         
         type_icon = "📊" if invest_type == 'base' else "⚡"
         
@@ -886,11 +952,12 @@ Use /setcapital to configure monthly capital.
 /etfs - ETF universe
 /rules - Investment rules
 /allocation - Allocation strategy
+/tradingstatus - Trading status flags
 
 *Investment Flow:*
 1. Set monthly capital with /setcapital
 2. View base plan with /baseplan (shows units to buy)
-3. System generates tactical decisions daily at 10:00 AM
+3. System generates tactical decisions daily at 3:15 PM
 4. Review tactical decision with /today
 5. Execute trades manually in your broker
 6. Record execution via /invest
@@ -945,6 +1012,7 @@ Use /setcapital to configure monthly capital.
             'etfs': self.etfs_command,
             'rules': self.rules_command,
             'allocation': self.allocation_command,
+            'tradingstatus': self.trading_status_command,
             'help': self.help_command,
             'menu': self.menu_command,
         }
@@ -1013,6 +1081,7 @@ Use /setcapital to configure monthly capital.
         application.add_handler(CommandHandler("rules", self.rules_command))
         application.add_handler(CommandHandler("allocation", self.allocation_command))
         application.add_handler(CommandHandler("month", self.month_command))
+        application.add_handler(CommandHandler("tradingstatus", self.trading_status_command))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CallbackQueryHandler(self.button_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_input))

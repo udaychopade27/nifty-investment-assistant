@@ -37,7 +37,10 @@ class YFinanceProvider:
             "BHARATBOND": "BHARATBOND.NS",
             "GOLDBEES": "GOLDBEES.NS",
             "MIDCAPETF": "MIDCAPETF.NS",
+            "NIFTY100BEES": "NIFTY100BEES.NS",
+            "HDFCGOLD": "HDFCGOLD.NS",
             "NIFTY50": "^NSEI",
+            "NIFTY 50": "^NSEI",
             "INDIA_VIX": "^INDIAVIX",
         }
         self.enable_nse_fallback = enable_nse_fallback
@@ -393,4 +396,62 @@ class YFinanceProvider:
 
         except Exception as e:
             logger.error(f"Error fetching India VIX: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # INDEX DAILY CHANGE
+    # ------------------------------------------------------------------
+
+    async def get_index_daily_change(
+        self,
+        index_name: str,
+        target_date: date
+    ) -> Optional[Decimal]:
+        """
+        Get daily % change for an index.
+        Prefers NSE index data, falls back to Yahoo history.
+        """
+        nse_provider = self._get_nse_provider()
+        if nse_provider:
+            try:
+                change = await nse_provider.get_index_change_pct(index_name)
+                if change is not None:
+                    return change
+            except Exception as nse_error:
+                logger.error(f"Error fetching NSE index change for {index_name}: {nse_error}")
+
+        # Yahoo fallback (requires a valid index symbol)
+        try:
+            yf_symbol = self.symbol_mapping.get(index_name, index_name)
+            ticker = yf.Ticker(yf_symbol)
+
+            hist = await self._history_with_retry(
+                ticker,
+                start=target_date - timedelta(days=10),
+                end=target_date + timedelta(days=1),
+                interval="1d",
+                auto_adjust=False
+            )
+
+            if hist.empty:
+                return None
+
+            hist.index = hist.index.date
+            if target_date not in hist.index:
+                return None
+
+            idx = list(hist.index).index(target_date)
+            if idx <= 0:
+                return None
+
+            close = float(hist.iloc[idx]["Close"])
+            prev_close = float(hist.iloc[idx - 1]["Close"])
+            if prev_close <= 0:
+                return None
+
+            change = ((close - prev_close) / prev_close) * 100
+            return self._quantize(change)
+
+        except Exception as e:
+            logger.error(f"Error fetching index change for {index_name}: {e}")
             return None

@@ -190,6 +190,64 @@ class NSEIndiaProvider:
         except Exception as e:
             logger.debug(f"Index API error for {index_name}: {e}")
             return None
+
+    async def get_index_snapshot(self, index_name: str) -> Optional[Dict[str, Decimal]]:
+        """
+        Get index snapshot (last, previous close, change % if available).
+        """
+        try:
+            data = await self._request_json(self.INDEX_URL)
+            if not data:
+                return None
+
+            for index in data.get('data', []):
+                if index_name.upper() in index.get('index', '').upper():
+                    last = index.get('last') or index.get('lastPrice')
+                    prev = (
+                        index.get('previousClose')
+                        or index.get('prevClose')
+                        or index.get('previous_close')
+                    )
+                    pct = (
+                        index.get('pChange')
+                        or index.get('perChange')
+                        or index.get('percChange')
+                        or index.get('changePercent')
+                    )
+
+                    snapshot: Dict[str, Decimal] = {}
+                    if last is not None:
+                        snapshot["last"] = Decimal(str(last))
+                    if prev is not None:
+                        snapshot["previous_close"] = Decimal(str(prev))
+                    if pct is not None:
+                        snapshot["change_pct"] = Decimal(str(pct))
+
+                    if snapshot:
+                        return snapshot
+            return None
+        except Exception as e:
+            logger.debug(f"Index snapshot error for {index_name}: {e}")
+            return None
+
+    async def get_index_change_pct(self, index_name: str) -> Optional[Decimal]:
+        """
+        Get daily % change for an index from NSE if available.
+        """
+        snapshot = await self.get_index_snapshot(index_name)
+        if not snapshot:
+            return None
+
+        if "change_pct" in snapshot:
+            return snapshot["change_pct"].quantize(Decimal("0.01"))
+
+        last = snapshot.get("last")
+        prev = snapshot.get("previous_close")
+        if last is None or prev is None or prev <= 0:
+            return None
+
+        change = ((last - prev) / prev) * Decimal("100")
+        return change.quantize(Decimal("0.01"))
     
     async def get_current_prices(self, symbols: List[str]) -> Dict[str, Decimal]:
         """
