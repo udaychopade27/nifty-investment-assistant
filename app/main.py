@@ -34,6 +34,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Reduce noisy loggers in production
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # Set process timezone to IST for logging
 os.environ["TZ"] = "Asia/Kolkata"
 if hasattr(time, "tzset"):

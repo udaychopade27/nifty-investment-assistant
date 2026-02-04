@@ -25,6 +25,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Reduce noisy loggers in bot process
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
 
 class ETFTelegramBot:
     """ETF Assistant Telegram Bot - Pure UX Layer"""

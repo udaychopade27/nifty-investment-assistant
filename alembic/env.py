@@ -14,11 +14,19 @@ from app.infrastructure.db.database import Base
 from app.infrastructure.db.models import *  # Import all models
 from app.config import settings
 
+
+def _normalize_sync_url(url: str) -> str:
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    if "+asyncpg" in url:
+        url = url.replace("+asyncpg", "+psycopg2")
+    return url
+
 # this is the Alembic Config object
 config = context.config
 
-# Override sqlalchemy.url with environment variable
-config.set_main_option('sqlalchemy.url', settings.DATABASE_URL)
+# Override sqlalchemy.url with environment variable (force sync driver for Alembic)
+config.set_main_option('sqlalchemy.url', _normalize_sync_url(settings.DATABASE_URL))
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:

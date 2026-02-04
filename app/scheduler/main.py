@@ -50,6 +50,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Reduce noisy loggers in scheduler process
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 class TelegramNotifier:
     """Simple Telegram notifier"""
