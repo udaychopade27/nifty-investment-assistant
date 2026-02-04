@@ -245,74 +245,6 @@ async def get_current_capital(db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.get("/{month}", response_model=MonthlyCapitalResponse)
-async def get_capital_for_month(
-    month: str,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Get capital configuration for a specific YYYY-MM month.
-    """
-    month_date, _ = resolve_month(month)
-
-    repo = MonthlyConfigRepository(db)
-    config = await repo.get_for_month(month_date)
-    carry_repo = CarryForwardLogRepository(db)
-    carry_log = await carry_repo.get_for_month(month_date) if config else None
-
-    if not config:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No capital configuration for {month}"
-        )
-
-    return MonthlyCapitalResponse(
-        month=config.month.strftime("%Y-%m"),
-        monthly_capital=float(config.monthly_capital),
-        base_capital=float(config.base_capital),
-        tactical_capital=float(config.tactical_capital),
-        trading_days=config.trading_days,
-        daily_tranche=float(config.daily_tranche),
-        strategy_version=config.strategy_version,
-        created_at=config.created_at.isoformat(),
-        month_source="explicit",
-        carry_forward_applied=bool(carry_log),
-        carry_forward_base=float(carry_log.base_carried_forward) if carry_log else None,
-        carry_forward_tactical=float(carry_log.tactical_carried_forward) if carry_log else None
-    )
-
-
-@router.get("/carry-forward/{month}", response_model=CarryForwardLogResponse)
-async def get_carry_forward_for_month(
-    month: str,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Get carry-forward log for a specific YYYY-MM month.
-    """
-    month_date, _ = resolve_month(month)
-    repo = CarryForwardLogRepository(db)
-    log = await repo.get_for_month(month_date)
-
-    if not log:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No carry-forward log found for {month}"
-        )
-
-    return CarryForwardLogResponse(
-        month=log.month.strftime("%Y-%m"),
-        previous_month=log.previous_month.strftime("%Y-%m"),
-        base_inflow=float(log.base_inflow),
-        tactical_inflow=float(log.tactical_inflow),
-        total_inflow=float(log.total_inflow),
-        base_carried_forward=float(log.base_carried_forward),
-        tactical_carried_forward=float(log.tactical_carried_forward),
-        total_monthly_capital=float(log.total_monthly_capital),
-        created_at=log.created_at.isoformat()
-    )
-
-
 @router.get("/state", response_model=CapitalStateResponse)
 async def get_current_capital_state(db: AsyncSession = Depends(get_db)):
     """
@@ -393,6 +325,74 @@ async def get_capital_state_history(
         )
 
     return history
+
+
+@router.get("/{month}", response_model=MonthlyCapitalResponse)
+async def get_capital_for_month(
+    month: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get capital configuration for a specific YYYY-MM month.
+    """
+    month_date, _ = resolve_month(month)
+
+    repo = MonthlyConfigRepository(db)
+    config = await repo.get_for_month(month_date)
+    carry_repo = CarryForwardLogRepository(db)
+    carry_log = await carry_repo.get_for_month(month_date) if config else None
+
+    if not config:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No capital configuration for {month}"
+        )
+
+    return MonthlyCapitalResponse(
+        month=config.month.strftime("%Y-%m"),
+        monthly_capital=float(config.monthly_capital),
+        base_capital=float(config.base_capital),
+        tactical_capital=float(config.tactical_capital),
+        trading_days=config.trading_days,
+        daily_tranche=float(config.daily_tranche),
+        strategy_version=config.strategy_version,
+        created_at=config.created_at.isoformat(),
+        month_source="explicit",
+        carry_forward_applied=bool(carry_log),
+        carry_forward_base=float(carry_log.base_carried_forward) if carry_log else None,
+        carry_forward_tactical=float(carry_log.tactical_carried_forward) if carry_log else None
+    )
+
+
+@router.get("/carry-forward/{month}", response_model=CarryForwardLogResponse)
+async def get_carry_forward_for_month(
+    month: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get carry-forward log for a specific YYYY-MM month.
+    """
+    month_date, _ = resolve_month(month)
+    repo = CarryForwardLogRepository(db)
+    log = await repo.get_for_month(month_date)
+
+    if not log:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No carry-forward log found for {month}"
+        )
+
+    return CarryForwardLogResponse(
+        month=log.month.strftime("%Y-%m"),
+        previous_month=log.previous_month.strftime("%Y-%m"),
+        base_inflow=float(log.base_inflow),
+        tactical_inflow=float(log.tactical_inflow),
+        total_inflow=float(log.total_inflow),
+        base_carried_forward=float(log.base_carried_forward),
+        tactical_carried_forward=float(log.tactical_carried_forward),
+        total_monthly_capital=float(log.total_monthly_capital),
+        created_at=log.created_at.isoformat()
+    )
 
 
 @router.post("/generate-base-plan")

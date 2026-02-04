@@ -38,8 +38,9 @@ services:
       DEBUG: "True"
       LOG_LEVEL: INFO
       TIMEZONE: Asia/Kolkata
-      PRICE_BUFFER_PERCENT: 2.0
-      MIN_INVESTMENT_AMOUNT: 100.00
+      PRICE_BUFFER_PERCENT: ${PRICE_BUFFER_PERCENT:-1.0}
+      MIN_INVESTMENT_AMOUNT: ${MIN_INVESTMENT_AMOUNT:-1000.00}
+      TRADING_ENABLED: ${TRADING_ENABLED:-True}
       
       # Telegram Settings
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
@@ -47,8 +48,8 @@ services:
       
       # Scheduler Settings
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-True}
-      DAILY_DECISION_TIME: "15:15"
-      MONTHLY_SUMMARY_TIME: "18:00"
+      DAILY_DECISION_TIME: ${DAILY_DECISION_TIME:-15:15}
+      MONTHLY_SUMMARY_TIME: ${MONTHLY_SUMMARY_TIME:-18:00}
       
     volumes:
       - ./config:/app/config
