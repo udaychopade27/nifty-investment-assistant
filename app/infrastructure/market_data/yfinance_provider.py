@@ -37,7 +37,7 @@ class YFinanceProvider:
             "BHARATBOND": "BHARATBOND.NS",
             "GOLDBEES": "GOLDBEES.NS",
             "MIDCAPETF": "MIDCAPETF.NS",
-            "NIFTY100BEES": "NIFTY100BEES.NS",
+            "NIF100BEES": "NIF100BEES.NS",
             "HDFCGOLD": "HDFCGOLD.NS",
             "NIFTY50": "^NSEI",
             "NIFTY 50": "^NSEI",

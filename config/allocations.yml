@@ -8,7 +8,7 @@ base_allocation:
   NIFTYBEES: 40.0     # Core large-cap
   JUNIORBEES: 25.0    # Next 50 growth
   LOWVOLIETF: 15.0    # Defensive equity
-  NIFTY100BEES: 10.0  # Large + upper mid blend
+  NIF100BEES: 10.0  # Large + upper mid blend
   MIDCAPETF: 5.0      # Mid-cap exposure
   HDFCGOLD: 5.0       # Gold hedge
 
@@ -19,7 +19,7 @@ tactical_allocation:
   JUNIORBEES: 25.0    # Growth opportunity
   LOWVOLIETF: 20.0    # Quality stocks on discount
   MIDCAPETF: 10.0     # Mid-cap opportunity
-  NIFTY100BEES: 0.0
+  NIF100BEES: 0.0
   HDFCGOLD: 0.0
 
 # Extra Capital Allocation (Crash opportunities)
@@ -29,7 +29,7 @@ crash_allocation:
   JUNIORBEES: 30.0    # Strong growth bet
   LOWVOLIETF: 15.0    # Quality at bargain
   MIDCAPETF: 5.0
-  NIFTY100BEES: 0.0
+  NIF100BEES: 0.0
   HDFCGOLD: 0.0
 
 # Validation Rules
@@ -67,7 +67,7 @@ single_etf_limits:
     max: 25.0
   MIDCAPETF:
     max: 10.0
-  NIFTY100BEES:
+  NIF100BEES:
     max: 20.0
   HDFCGOLD:
     max: 15.0

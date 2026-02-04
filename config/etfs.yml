@@ -27,7 +27,7 @@ etfs:
     risk_level: medium_high
     expense_ratio: 0.28
 
-  - symbol: NIFTY100BEES
+  - symbol: NIF100BEES
     name: Nippon India ETF Nifty 100
     category: core_plus
     asset_class: equity
