@@ -199,6 +199,7 @@ class ExecutedInvestment:
     executed_price: Decimal
     total_amount: Decimal
     slippage_pct: Decimal
+    capital_bucket: Optional[str] = None
     executed_at: Optional[datetime] = None
     execution_notes: Optional[str] = None
     id: Optional[int] = None

@@ -11,8 +11,11 @@ import {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 // Utility Components
-const Card = ({ children, className = '' }) => (
-  <div className={`bg-[var(--card)] rounded-2xl shadow-sm border border-[var(--line)] ${className}`}>
+const Card = ({ children, className = '', ...props }) => (
+  <div
+    className={`bg-[var(--card)] rounded-2xl shadow-sm border border-[var(--line)] ${className}`}
+    {...props}
+  >
     {children}
   </div>
 );
@@ -127,6 +130,10 @@ class APIService {
   
   static getPnl() {
     return this.get('/api/v1/portfolio/pnl');
+  }
+
+  static getInvestmentHistory(bucket = 'all', limit = 20) {
+    return this.get(`/api/v1/invest/history/${bucket}?limit=${limit}`);
   }
   
   // Config APIs
@@ -479,6 +486,149 @@ const PortfolioSummary = ({ portfolio }) => {
   );
 };
 
+// Trade History Panel
+const TradeHistoryPanel = ({ history, filter, onFilterChange, page, onPageChange, pageSize }) => {
+  if (!history) {
+    return (
+      <Card className="p-6">
+        <div className="text-center py-6">
+          <Activity className="h-10 w-10 text-gray-300 mx-auto mb-2" />
+          <p className="text-gray-600">Loading trade history...</p>
+        </div>
+      </Card>
+    );
+  }
+
+  if (!history.investments || history.investments.length === 0) {
+    return (
+      <Card className="p-6">
+        <div className="text-center py-6">
+          <Activity className="h-10 w-10 text-gray-300 mx-auto mb-2" />
+          <p className="text-gray-600">No trades recorded yet</p>
+        </div>
+      </Card>
+    );
+  }
+
+  const allInvestments = history.investments;
+  const filteredInvestments =
+    filter === 'all'
+      ? allInvestments
+      : allInvestments.filter((inv) => inv.bucket === filter);
+  const totalBaseSpent = allInvestments
+    .filter((inv) => inv.bucket === 'base')
+    .reduce((sum, inv) => sum + Number(inv.total || 0), 0);
+  const totalTacticalSpent = allInvestments
+    .filter((inv) => inv.bucket === 'tactical')
+    .reduce((sum, inv) => sum + Number(inv.total || 0), 0);
+
+  const totalPages = Math.max(1, Math.ceil(filteredInvestments.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const startIndex = (currentPage - 1) * pageSize;
+  const pagedInvestments = filteredInvestments.slice(startIndex, startIndex + pageSize);
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center space-x-3">
+          <Activity className="h-5 w-5 text-primary-600" />
+          <h2 className="text-lg font-semibold text-ink-0">Recent Trades</h2>
+        </div>
+        <Badge variant="info">{history.count}</Badge>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-4 text-sm">
+        <div className="bg-stone-50 p-3 rounded-lg">
+          <p className="text-ink-1/60">Base Spent</p>
+          <p className="font-semibold">₹{totalBaseSpent.toLocaleString()}</p>
+        </div>
+        <div className="bg-amber-50 p-3 rounded-lg">
+          <p className="text-ink-1/60">Tactical Spent</p>
+          <p className="font-semibold">₹{totalTacticalSpent.toLocaleString()}</p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center space-x-2">
+          <Button
+            variant={filter === 'all' ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() => onFilterChange('all')}
+          >
+            All
+          </Button>
+          <Button
+            variant={filter === 'base' ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() => onFilterChange('base')}
+          >
+            Base
+          </Button>
+          <Button
+            variant={filter === 'tactical' ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() => onFilterChange('tactical')}
+          >
+            Tactical
+          </Button>
+        </div>
+        <div className="text-xs text-ink-1/60">
+          Page {currentPage} of {totalPages}
+        </div>
+      </div>
+
+      <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+        {pagedInvestments.map((inv) => (
+          <div key={inv.id} className="border border-gray-200 rounded-lg p-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <span className="font-bold text-ink-0">{inv.etf_symbol}</span>
+                <Badge variant={inv.bucket === 'tactical' ? 'warning' : 'default'}>
+                  {inv.bucket}
+                </Badge>
+              </div>
+              <span className="text-xs text-ink-1/60">{inv.date}</span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-sm mt-2">
+              <div>
+                <p className="text-ink-1/60">Units</p>
+                <p className="font-medium">{inv.units}</p>
+              </div>
+              <div>
+                <p className="text-ink-1/60">Price</p>
+                <p className="font-medium">₹{Number(inv.price).toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-ink-1/60">Total</p>
+                <p className="font-medium">₹{Number(inv.total).toLocaleString()}</p>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between mt-4">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => onPageChange(Math.max(1, currentPage - 1))}
+          disabled={currentPage <= 1}
+        >
+          Prev
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
+          disabled={currentPage >= totalPages}
+        >
+          Next
+        </Button>
+      </div>
+    </Card>
+  );
+};
+
 // Set Capital Modal
 const SetCapitalModal = ({ isOpen, onClose, onSubmit }) => {
   const [amount, setAmount] = useState('');
@@ -564,8 +714,11 @@ const BasePlanModal = ({ isOpen, onClose, plan }) => {
   if (!isOpen) return null;
   
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 overflow-y-auto">
-      <Card className="max-w-3xl w-full p-6 my-8">
+    <div
+      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 overflow-y-auto"
+      onClick={onClose}
+    >
+      <Card className="max-w-3xl w-full p-6 my-8" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-xl font-bold text-gray-900">Base Investment Plan</h3>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
@@ -628,6 +781,12 @@ const BasePlanModal = ({ isOpen, onClose, plan }) => {
                 Execute these investments gradually throughout the month. Can invest on any trading day.
               </p>
             </div>
+
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={onClose}>
+                Close
+              </Button>
+            </div>
           </div>
         ) : (
           <div className="text-center py-8">
@@ -635,6 +794,192 @@ const BasePlanModal = ({ isOpen, onClose, plan }) => {
             <p className="text-gray-600">Loading base plan...</p>
           </div>
         )}
+      </Card>
+    </div>
+  );
+};
+
+// Quick Trade Modal
+const QuickTradeModal = ({ isOpen, onClose, tradeType, symbols, onSubmit, basePlan, decision, history }) => {
+  const [etfSymbol, setEtfSymbol] = useState('');
+  const [units, setUnits] = useState('');
+  const [price, setPrice] = useState('');
+  const [notes, setNotes] = useState('');
+  const [loading, setLoading] = useState(false);
+  const tacticalBlocked = tradeType === 'tactical' && (!decision || decision.decision_type === 'NONE');
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const currentMonth = todayStr.slice(0, 7);
+  const alreadyExecuted = (() => {
+    if (!history?.investments || !etfSymbol) return false;
+    const symbol = etfSymbol.toUpperCase();
+    if (tradeType === 'base') {
+      return history.investments.some(
+        (inv) =>
+          inv.bucket === 'base' &&
+          inv.etf_symbol === symbol &&
+          inv.date &&
+          inv.date.startsWith(currentMonth)
+      );
+    }
+    if (tradeType === 'tactical') {
+      return history.investments.some(
+        (inv) =>
+          inv.bucket === 'tactical' &&
+          inv.etf_symbol === symbol &&
+          inv.date === todayStr
+      );
+    }
+    return false;
+  })();
+  const recommendedUnits = basePlan?.base_plan?.[etfSymbol?.toUpperCase()]?.recommended_units || 0;
+
+  useEffect(() => {
+    if (!isOpen) {
+      setEtfSymbol('');
+      setUnits('');
+      setPrice('');
+      setNotes('');
+      setLoading(false);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (tradeType !== 'base') return;
+    if (!etfSymbol || !basePlan?.base_plan) return;
+    const planEntry = basePlan.base_plan[etfSymbol.toUpperCase()];
+    if (planEntry && planEntry.recommended_units > 0) {
+      setUnits(String(planEntry.recommended_units));
+    }
+  }, [tradeType, etfSymbol, basePlan]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async () => {
+    if (!etfSymbol || !units || !price) return;
+    if (Number(units) < 1) {
+      alert('Units must be at least 1');
+      return;
+    }
+    if (alreadyExecuted) {
+      const message =
+        tradeType === 'base'
+          ? `Base trade already executed for ${etfSymbol.toUpperCase()} this month.`
+          : `Tactical trade already executed for ${etfSymbol.toUpperCase()} today.`;
+      console.warn(message);
+      alert(message);
+      return;
+    }
+    setLoading(true);
+    try {
+      await onSubmit({
+        etf_symbol: etfSymbol.toUpperCase(),
+        units: Number(units),
+        executed_price: Number(price),
+        notes: notes || undefined
+      });
+      onClose();
+    } catch (err) {
+      alert(err.message || 'Failed to execute trade');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <Card className="max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-xl font-bold text-gray-900">
+            {tradeType === 'base' ? 'Execute Base Trade' : 'Execute Tactical Trade'}
+          </h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          {tacticalBlocked && (
+            <div className="bg-amber-50 text-amber-800 text-sm p-3 rounded-lg">
+              Tactical trades are blocked because today's decision is NONE.
+            </div>
+          )}
+          {alreadyExecuted && (
+            <div className="bg-rose-50 text-rose-800 text-sm p-3 rounded-lg">
+              {tradeType === 'base'
+                ? 'Base trade already executed for this ETF this month.'
+                : 'Tactical trade already executed for this ETF today.'}
+            </div>
+          )}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">ETF Symbol</label>
+            <input
+              list="etf-symbols"
+              value={etfSymbol}
+              onChange={(e) => setEtfSymbol(e.target.value)}
+              placeholder="NIFTYBEES"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+            />
+            <datalist id="etf-symbols">
+              {symbols.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
+            {tradeType === 'base' && etfSymbol && (
+              <p className="text-xs text-gray-500 mt-1">
+                Recommended units: <span className="font-medium text-gray-700">{recommendedUnits || 0}</span>
+              </p>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Units</label>
+              <input
+                type="number"
+                min="1"
+                value={units}
+                onChange={(e) => setUnits(e.target.value)}
+                placeholder="1"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Executed Price</label>
+              <input
+                type="number"
+                value={price}
+                onChange={(e) => setPrice(e.target.value)}
+                placeholder="100.50"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Notes (optional)</label>
+            <input
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Order ID, broker note, etc."
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+            />
+          </div>
+        </div>
+
+        <div className="flex space-x-3 mt-6">
+          <Button variant="secondary" className="flex-1" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            className="flex-1"
+            onClick={handleSubmit}
+            disabled={loading || !etfSymbol || !units || !price || Number(units) < 1 || tacticalBlocked || alreadyExecuted}
+          >
+            {loading ? 'Saving...' : 'Execute'}
+          </Button>
+        </div>
       </Card>
     </div>
   );
@@ -649,6 +994,12 @@ const ETFDashboard = () => {
   const [basePlan, setBasePlan] = useState(null);
   const [showCapitalModal, setShowCapitalModal] = useState(false);
   const [showBasePlanModal, setShowBasePlanModal] = useState(false);
+  const [tradeModalOpen, setTradeModalOpen] = useState(false);
+  const [tradeType, setTradeType] = useState('base');
+  const [tradeHistory, setTradeHistory] = useState(null);
+  const [tradeFilter, setTradeFilter] = useState('all');
+  const [tradePage, setTradePage] = useState(1);
+  const tradePageSize = 10;
   const [loading, setLoading] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   
@@ -659,13 +1010,15 @@ const ETFDashboard = () => {
   const loadDashboardData = async () => {
     setLoading(true);
     try {
-      const [capitalData, portfolioData] = await Promise.all([
+      const [capitalData, portfolioData, historyData] = await Promise.all([
         APIService.getCapital().catch(() => null),
-        APIService.getPnl().catch(() => null)
+        APIService.getPnl().catch(() => null),
+        APIService.getInvestmentHistory('all', 200).catch(() => null)
       ]);
       
       setCapital(capitalData);
       setPortfolio(portfolioData);
+      setTradeHistory(historyData);
       
       // Load decision
       try {
@@ -705,6 +1058,21 @@ const ETFDashboard = () => {
       alert(error.message);
       setShowBasePlanModal(false);
     }
+  };
+
+  const closeBasePlan = () => {
+    setShowBasePlanModal(false);
+    setBasePlan(null);
+  };
+
+  const openTradeModal = (type) => {
+    setTradeType(type);
+    setTradeModalOpen(true);
+  };
+
+  const handleTradeSubmit = async (data) => {
+    await APIService.executeInvestment(tradeType, data);
+    await loadDashboardData();
   };
   
   if (loading) {
@@ -759,17 +1127,17 @@ const ETFDashboard = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left Column - Decision & Capital */}
           <div className="lg:col-span-2 space-y-6">
-            <TodayDecision decision={decision} onInvest={() => alert('Invest feature')} />
+            <TodayDecision decision={decision} onInvest={() => openTradeModal('tactical')} />
             
             {/* Quick Actions */}
             <Card className="p-6">
               <h3 className="text-lg font-semibold text-ink-0 mb-4">Quick Actions</h3>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <Button variant="outline" size="sm" className="flex flex-col items-center py-4">
+                <Button variant="outline" size="sm" className="flex flex-col items-center py-4" onClick={() => openTradeModal('base')}>
                   <Shield className="h-5 w-5 mb-2" />
                   <span className="text-xs">Base Invest</span>
                 </Button>
-                <Button variant="outline" size="sm" className="flex flex-col items-center py-4">
+                <Button variant="outline" size="sm" className="flex flex-col items-center py-4" onClick={() => openTradeModal('tactical')}>
                   <Zap className="h-5 w-5 mb-2" />
                   <span className="text-xs">Tactical</span>
                 </Button>
@@ -793,6 +1161,17 @@ const ETFDashboard = () => {
               onViewBasePlan={handleViewBasePlan}
             />
             <PortfolioSummary portfolio={portfolio} />
+            <TradeHistoryPanel
+              history={tradeHistory}
+              filter={tradeFilter}
+              onFilterChange={(f) => {
+                setTradeFilter(f);
+                setTradePage(1);
+              }}
+              page={tradePage}
+              onPageChange={setTradePage}
+              pageSize={tradePageSize}
+            />
           </div>
         </div>
       </div>
@@ -806,8 +1185,24 @@ const ETFDashboard = () => {
       
       <BasePlanModal
         isOpen={showBasePlanModal}
-        onClose={() => setShowBasePlanModal(false)}
+        onClose={closeBasePlan}
         plan={basePlan}
+      />
+
+      <QuickTradeModal
+        isOpen={tradeModalOpen}
+        onClose={() => setTradeModalOpen(false)}
+        tradeType={tradeType}
+        basePlan={basePlan}
+        decision={decision}
+        history={tradeHistory}
+        symbols={[
+          ...new Set([
+            ...(basePlan ? Object.keys(basePlan.base_plan || {}) : []),
+            ...(portfolio?.holdings || []).map((h) => h.etf_symbol),
+          ]),
+        ]}
+        onSubmit={handleTradeSubmit}
       />
     </div>
   );

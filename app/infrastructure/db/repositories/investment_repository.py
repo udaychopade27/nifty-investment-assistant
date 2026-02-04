@@ -257,6 +257,7 @@ class ExecutedInvestmentRepository:
             executed_price=model.executed_price,
             total_amount=model.total_amount,
             slippage_pct=model.slippage_pct,
+            capital_bucket=model.capital_bucket,
             executed_at=model.executed_at,
             execution_notes=model.execution_notes
         )

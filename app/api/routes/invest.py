@@ -451,7 +451,7 @@ async def get_investment_history(
         "investments": [
             {
                 "id": inv.id,
-                "date": inv.executed_at.date().isoformat(),
+                "date": inv.executed_at.date().isoformat() if inv.executed_at else None,
                 "etf_symbol": inv.etf_symbol,
                 "units": inv.units,
                 "price": float(inv.executed_price),

@@ -16,7 +16,7 @@ services:
     networks:
       - etf_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U etf_user"]
+      test: ["CMD-SHELL", "pg_isready -U etf_user -d etf_assistant"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,7 +26,6 @@ services:
     build: 
       context: .
       dockerfile: docker/Dockerfile
-
     container_name: etf_app
     depends_on:
       db:
@@ -41,16 +40,13 @@ services:
       PRICE_BUFFER_PERCENT: ${PRICE_BUFFER_PERCENT:-1.0}
       MIN_INVESTMENT_AMOUNT: ${MIN_INVESTMENT_AMOUNT:-1000.00}
       TRADING_ENABLED: ${TRADING_ENABLED:-True}
-      
       # Telegram Settings
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-True}
-      
       # Scheduler Settings
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-True}
       DAILY_DECISION_TIME: ${DAILY_DECISION_TIME:-15:15}
       MONTHLY_SUMMARY_TIME: ${MONTHLY_SUMMARY_TIME:-18:00}
-      
     volumes:
       - ./config:/app/config
       - ./app:/app/app
