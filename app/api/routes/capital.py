@@ -12,13 +12,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 from datetime import date
 from decimal import Decimal
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 from app.infrastructure.db.database import get_db
 from app.infrastructure.db.repositories.monthly_config_repository import MonthlyConfigRepository
 from app.infrastructure.db.repositories.base_plan_repository import BaseInvestmentPlanRepository
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 from app.infrastructure.db.repositories.carry_forward_repository import CarryForwardLogRepository
+from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
+from app.infrastructure.db.repositories.extra_capital_repository import ExtraCapitalRepository
+from app.infrastructure.db.models import MonthlyConfigModel
+from sqlalchemy import select
 
 router = APIRouter()
 
@@ -88,6 +92,16 @@ class CarryForwardLogResponse(BaseModel):
     tactical_carried_forward: float
     total_monthly_capital: float
     created_at: str
+
+
+class CapitalStateResponse(BaseModel):
+    month: str
+    base_total: float
+    base_remaining: float
+    tactical_total: float
+    tactical_remaining: float
+    extra_total: float
+    extra_remaining: float
 
 
 # -------------------------------------------------------------------
@@ -297,6 +311,88 @@ async def get_carry_forward_for_month(
         total_monthly_capital=float(log.total_monthly_capital),
         created_at=log.created_at.isoformat()
     )
+
+
+@router.get("/state", response_model=CapitalStateResponse)
+async def get_current_capital_state(db: AsyncSession = Depends(get_db)):
+    """
+    Get current month's capital state (remaining per bucket).
+    """
+    repo = MonthlyConfigRepository(db)
+    config = await repo.get_current()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="No capital configured for current month")
+
+    inv_repo = ExecutedInvestmentRepository(db)
+    extra_repo = ExtraCapitalRepository(db)
+
+    base_deployed = await inv_repo.get_total_base_deployed(config.month)
+    tactical_deployed = await inv_repo.get_total_tactical_deployed(config.month)
+    extra_deployed = await inv_repo.get_total_extra_deployed(config.month)
+    extra_injected = await extra_repo.get_total_for_month(config.month)
+
+    base_remaining = max(config.base_capital - base_deployed, Decimal("0"))
+    tactical_remaining = max(config.tactical_capital - tactical_deployed, Decimal("0"))
+    extra_remaining = max(extra_injected - extra_deployed, Decimal("0"))
+
+    return CapitalStateResponse(
+        month=config.month.strftime("%Y-%m"),
+        base_total=float(config.base_capital),
+        base_remaining=float(base_remaining),
+        tactical_total=float(config.tactical_capital),
+        tactical_remaining=float(tactical_remaining),
+        extra_total=float(extra_injected),
+        extra_remaining=float(extra_remaining),
+    )
+
+
+@router.get("/state/history", response_model=List[CapitalStateResponse])
+async def get_capital_state_history(
+    limit: int = 12,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get capital state history for the most recent months.
+    """
+    if limit <= 0 or limit > 36:
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 36")
+
+    result = await db.execute(
+        select(MonthlyConfigModel).order_by(MonthlyConfigModel.month.desc()).limit(limit)
+    )
+    configs = result.scalars().all()
+
+    if not configs:
+        return []
+
+    inv_repo = ExecutedInvestmentRepository(db)
+    extra_repo = ExtraCapitalRepository(db)
+
+    history: List[CapitalStateResponse] = []
+    for cfg in configs:
+        base_deployed = await inv_repo.get_total_base_deployed(cfg.month)
+        tactical_deployed = await inv_repo.get_total_tactical_deployed(cfg.month)
+        extra_deployed = await inv_repo.get_total_extra_deployed(cfg.month)
+        extra_injected = await extra_repo.get_total_for_month(cfg.month)
+
+        base_remaining = max(cfg.base_capital - base_deployed, Decimal("0"))
+        tactical_remaining = max(cfg.tactical_capital - tactical_deployed, Decimal("0"))
+        extra_remaining = max(extra_injected - extra_deployed, Decimal("0"))
+
+        history.append(
+            CapitalStateResponse(
+                month=cfg.month.strftime("%Y-%m"),
+                base_total=float(cfg.base_capital),
+                base_remaining=float(base_remaining),
+                tactical_total=float(cfg.tactical_capital),
+                tactical_remaining=float(tactical_remaining),
+                extra_total=float(extra_injected),
+                extra_remaining=float(extra_remaining),
+            )
+        )
+
+    return history
 
 
 @router.post("/generate-base-plan")

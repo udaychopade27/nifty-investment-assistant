@@ -47,7 +47,7 @@ services:
       
       # Scheduler Settings
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-True}
-      DAILY_DECISION_TIME: "10:00"
+      DAILY_DECISION_TIME: "15:15"
       MONTHLY_SUMMARY_TIME: "18:00"
       
     volumes:
