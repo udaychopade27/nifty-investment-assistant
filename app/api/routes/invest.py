@@ -5,6 +5,7 @@ STRICT CAPITAL BUCKET SEPARATION
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from pydantic import BaseModel, Field
 from datetime import date, datetime
 from typing import Optional, Literal
@@ -116,7 +117,36 @@ async def execute_base_investment(
             detail="❌ Monthly capital not configured. Set capital before investing.",
         )
 
-    # 2️⃣ Prevent BASE overspend
+    # 2️⃣ Idempotent check: one base execution per symbol per month
+    next_month = date(
+        month_start.year + (1 if month_start.month == 12 else 0),
+        1 if month_start.month == 12 else month_start.month + 1,
+        1
+    )
+    existing = await db.execute(
+        select(ExecutedInvestmentModel)
+        .where(
+            ExecutedInvestmentModel.capital_bucket == "base",
+            ExecutedInvestmentModel.etf_symbol == request.etf_symbol,
+            ExecutedInvestmentModel.executed_at >= month_start,
+            ExecutedInvestmentModel.executed_at < next_month,
+        )
+        .limit(1)
+    )
+    existing_investment = existing.scalar_one_or_none()
+    if existing_investment:
+        return InvestmentResponse(
+            id=existing_investment.id,
+            capital_bucket="base",
+            etf_symbol=existing_investment.etf_symbol,
+            units=existing_investment.units,
+            executed_price=float(existing_investment.executed_price),
+            total_amount=float(existing_investment.total_amount),
+            executed_at=existing_investment.executed_at.isoformat(),
+            decision_linked=False,
+        )
+
+    # 3️⃣ Prevent BASE overspend
     invest_repo = ExecutedInvestmentRepository(db)
     base_deployed = await invest_repo.get_total_base_deployed(monthly_config.month)
 
@@ -130,7 +160,7 @@ async def execute_base_investment(
             ),
         )
 
-    # 3️⃣ Record investment
+    # 4️⃣ Record investment
     execution_notes = request.notes or "Base investment via API"
     if settings.SIMULATION_ONLY:
         execution_notes = f"SIMULATION | {execution_notes}"
@@ -222,7 +252,37 @@ async def execute_tactical_investment(
             detail="❌ Today's decision is NONE. Tactical investment blocked.",
         )
 
-    # 3️⃣ Prevent TACTICAL overspend
+    # 3️⃣ Ensure ETF decision exists + idempotent per decision
+    etf_repo = ETFDecisionRepository(db)
+    etf_decision = await etf_repo.get_by_decision_and_symbol(
+        daily_decision.id,
+        request.etf_symbol
+    )
+    if not etf_decision:
+        raise HTTPException(
+            status_code=400,
+            detail=f"❌ No ETF decision for {request.etf_symbol} today",
+        )
+
+    existing = await db.execute(
+        select(ExecutedInvestmentModel)
+        .where(ExecutedInvestmentModel.etf_decision_id == etf_decision.id)
+        .limit(1)
+    )
+    existing_investment = existing.scalar_one_or_none()
+    if existing_investment:
+        return InvestmentResponse(
+            id=existing_investment.id,
+            capital_bucket="tactical",
+            etf_symbol=existing_investment.etf_symbol,
+            units=existing_investment.units,
+            executed_price=float(existing_investment.executed_price),
+            total_amount=float(existing_investment.total_amount),
+            executed_at=existing_investment.executed_at.isoformat(),
+            decision_linked=True,
+        )
+
+    # 4️⃣ Prevent TACTICAL overspend
     invest_repo = ExecutedInvestmentRepository(db)
     tactical_deployed = await invest_repo.get_total_tactical_deployed(
         monthly_config.month
@@ -238,13 +298,13 @@ async def execute_tactical_investment(
             ),
         )
 
-    # 4️⃣ Record investment
+    # 5️⃣ Record investment
     execution_notes = request.notes or f"Tactical investment (Decision: {daily_decision.decision_type.value})"
     if settings.SIMULATION_ONLY:
         execution_notes = f"SIMULATION | {execution_notes}"
 
     investment = ExecutedInvestmentModel(
-        etf_decision_id=daily_decision.id,
+        etf_decision_id=etf_decision.id,
         etf_symbol=request.etf_symbol,
         units=request.units,
         executed_price=Decimal(str(request.executed_price)),

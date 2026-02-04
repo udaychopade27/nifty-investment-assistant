@@ -28,6 +28,7 @@ from app.infrastructure.db.repositories.decision_repository import DailyDecision
 from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
 from app.infrastructure.db.repositories.extra_capital_repository import ExtraCapitalRepository
 from app.infrastructure.db.repositories.carry_forward_repository import CarryForwardLogRepository
+from app.infrastructure.db.repositories.base_plan_repository import BaseInvestmentPlanRepository
 from app.domain.services.config_engine import ConfigEngine
 from app.domain.services.market_context_engine import MarketContextEngine
 from app.domain.services.capital_engine import CapitalEngine
@@ -449,6 +450,105 @@ class ETFScheduler:
             logger.error(f"❌ Monthly summary job failed: {e}")
             import traceback
             traceback.print_exc()
+
+    async def base_plan_job(self):
+        """
+        Generate base plan on the first trading day of the month.
+        """
+        logger.info("🔄 Starting base plan job...")
+        today = date.today()
+
+        if not self.nse_calendar.is_trading_day(today):
+            logger.info("⏭️  Skipping base plan job (not a trading day)")
+            return
+
+        month_start = date(today.year, today.month, 1)
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        month_end = date(today.year, today.month, last_day)
+        trading_days = self.nse_calendar.get_trading_days_list(month_start, month_end)
+        if not trading_days:
+            logger.warning("⚠️  No trading days found for month")
+            return
+
+        if today != trading_days[0]:
+            logger.info("⏭️  Skipping base plan job (not first trading day)")
+            return
+
+        try:
+            async with async_session_factory() as session:
+                base_plan_repo = BaseInvestmentPlanRepository(session)
+                existing = await base_plan_repo.get_for_month(month_start)
+                if existing:
+                    logger.info("✅ Base plan already exists for this month")
+                    return
+
+                month_repo = MonthlyConfigRepository(session)
+                config = await month_repo.get_for_month(month_start)
+                if not config:
+                    logger.warning("⚠️  No monthly config to generate base plan")
+                    return
+
+                market_provider = YFinanceProvider()
+                unit_engine = UnitCalculationEngine(price_buffer_pct=Decimal('2.0'))
+
+                base_allocation = self.config_engine.base_allocation.allocations
+                current_prices = await market_provider.get_current_prices(
+                    list(base_allocation.keys())
+                )
+
+                base_plan = {}
+                missing_prices = []
+                for symbol, allocation_pct in base_allocation.items():
+                    if allocation_pct == 0:
+                        continue
+
+                    amount = (config.base_capital * Decimal(str(allocation_pct)) / Decimal("100"))
+                    ltp = current_prices.get(symbol, Decimal("0"))
+                    if ltp <= 0:
+                        missing_prices.append(symbol)
+                        continue
+
+                    effective_price = unit_engine.calculate_effective_price(ltp)
+                    units = unit_engine.calculate_units_for_amount(amount, effective_price)
+                    actual_amount = units * effective_price
+
+                    base_plan[symbol] = {
+                        "allocation_pct": float(allocation_pct),
+                        "allocated_amount": float(amount),
+                        "ltp": float(ltp),
+                        "effective_price": float(effective_price),
+                        "recommended_units": units,
+                        "actual_amount": float(actual_amount),
+                        "unused": float(amount - actual_amount)
+                    }
+
+                if missing_prices:
+                    logger.warning(
+                        "⚠️  Base plan not generated; missing prices for: "
+                        + ", ".join(sorted(missing_prices))
+                    )
+                    return
+
+                plan_payload = {
+                    "month": config.month.strftime("%B %Y"),
+                    "base_capital": float(config.base_capital),
+                    "month_source": "auto_current",
+                    "base_plan": base_plan,
+                    "note": "Execute gradually across trading days"
+                }
+
+                await base_plan_repo.create(
+                    month=month_start,
+                    base_capital=config.base_capital,
+                    strategy_version=config.strategy_version,
+                    plan_json=plan_payload,
+                )
+
+                logger.info("✅ Base plan generated and persisted")
+        except Exception as e:
+            logger.error(f"❌ Base plan job failed: {e}")
+            import traceback
+            traceback.print_exc()
     
     def start(self):
         """Start the scheduler"""
@@ -487,6 +587,15 @@ class ETFScheduler:
             CronTrigger(day='last', hour=18, minute=0),
             id='monthly_summary',
             name='Monthly Summary Report',
+            replace_existing=True
+        )
+
+        # Base plan job (daily check; runs only on first trading day)
+        self.scheduler.add_job(
+            self.base_plan_job,
+            CronTrigger(hour=9, minute=5, day_of_week='mon-fri'),
+            id='base_plan',
+            name='Base Plan Generation',
             replace_existing=True
         )
         

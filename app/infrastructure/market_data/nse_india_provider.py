@@ -13,6 +13,11 @@ import asyncio
 import httpx
 import json
 from bs4 import BeautifulSoup
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.infrastructure.db.database import async_session_factory
+from app.infrastructure.db.models import MarketDataCacheModel
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +63,7 @@ class NSEIndiaProvider:
         self.session: Optional[httpx.AsyncClient] = None
         self.cookies = None
         self.allow_static_fallback = allow_static_fallback
+        self._last_good_cache: Dict[str, Decimal] = {}
         
     async def _get_session(self) -> httpx.AsyncClient:
         """Get or create HTTP session with cookies"""
@@ -75,9 +81,9 @@ class NSEIndiaProvider:
         
         return self.session
 
-    async def _request_json(self, url: str, retries: int = 2) -> Optional[dict]:
+    async def _request_json(self, url: str, retries: int = 0) -> Optional[dict]:
         """
-        Request JSON with retry/backoff to reduce NSE flakiness.
+        Request JSON (single attempt by default to avoid retry storms).
         """
         session = await self._get_session()
         last_exc: Optional[Exception] = None
@@ -86,23 +92,84 @@ class NSEIndiaProvider:
                 response = await session.get(url)
                 if response.status_code == 200:
                     content_type = response.headers.get("content-type", "")
+                    # Prefer JSON response if possible
                     if "application/json" in content_type:
-                        return response.json()
+                        try:
+                            return response.json()
+                        except Exception:
+                            pass
                     # Some NSE responses return invalid/binary payloads; decode defensively.
                     raw = response.content
                     try:
-                        text = raw.decode("utf-8", errors="ignore")
+                        text = raw.decode("utf-8")
                         return json.loads(text)
                     except Exception:
-                        logger.debug(f"NSE non-JSON response for {url}")
+                        logger.debug(f"NSE non-JSON or invalid payload for {url}")
                         return None
                 logger.debug(f"NSE status {response.status_code} for {url}")
             except Exception as exc:
                 last_exc = exc
-            await asyncio.sleep(0.4 * (2 ** attempt))
+            if retries > 0:
+                await asyncio.sleep(0.4 * (2 ** attempt))
         if last_exc:
-            logger.warning(f"NSE request failed for {url}: {last_exc}")
+            logger.debug(f"NSE request failed for {url}: {last_exc}")
         return None
+
+    async def _get_cached_price(self, symbol: str) -> Optional[Decimal]:
+        # In-memory cache first
+        cached = self._last_good_cache.get(symbol)
+        if cached is not None and cached > 0:
+            return cached
+
+        # DB cache (last known good price)
+        try:
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(MarketDataCacheModel.close_price)
+                    .where(
+                        MarketDataCacheModel.symbol == symbol,
+                        MarketDataCacheModel.close_price.is_not(None)
+                    )
+                    .order_by(MarketDataCacheModel.date.desc())
+                    .limit(1)
+                )
+                row = result.first()
+                if row and row[0] is not None:
+                    price = Decimal(str(row[0]))
+                    self._last_good_cache[symbol] = price
+                    return price
+        except SQLAlchemyError as exc:
+            logger.debug(f"Price cache DB read failed for {symbol}: {exc}")
+        return None
+
+    async def _save_cached_price(self, symbol: str, price: Decimal) -> None:
+        if price <= 0:
+            return
+        self._last_good_cache[symbol] = price
+        try:
+            today = datetime.now().date()
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(MarketDataCacheModel)
+                    .where(
+                        MarketDataCacheModel.symbol == symbol,
+                        MarketDataCacheModel.date == today
+                    )
+                )
+                row = result.scalar_one_or_none()
+                if row:
+                    row.close_price = price
+                else:
+                    session.add(
+                        MarketDataCacheModel(
+                            symbol=symbol,
+                            date=today,
+                            close_price=price
+                        )
+                    )
+                await session.commit()
+        except SQLAlchemyError as exc:
+            logger.debug(f"Price cache DB write failed for {symbol}: {exc}")
     
     async def close(self):
         """Close HTTP session"""
@@ -121,13 +188,20 @@ class NSEIndiaProvider:
             Current price as Decimal
         """
         try:
-            # Try NSE API first
+            # Try NSE API first (single attempt)
             price = await self._fetch_nse_price(symbol)
             if price and price > 0:
+                await self._save_cached_price(symbol, price)
                 logger.info(f"✅ NSE price for {symbol}: ₹{price}")
                 return price
         except Exception as e:
-            logger.warning(f"NSE API failed for {symbol}: {e}")
+            logger.debug(f"NSE API failed for {symbol}: {e}")
+
+        # Last known good price (cache)
+        cached_price = await self._get_cached_price(symbol)
+        if cached_price:
+            logger.info(f"📦 Using cached price for {symbol}: ₹{cached_price}")
+            return cached_price
         
         # Optional static fallback (disabled by default)
         if self.allow_static_fallback:
@@ -138,7 +212,7 @@ class NSEIndiaProvider:
             logger.warning(f"⚠️ No price available for {symbol}, using default 100.00")
             return Decimal('100.00')
         
-        logger.warning(f"⚠️ No NSE price available for {symbol}")
+        logger.debug(f"No NSE price available for {symbol}")
         return None
     
     async def _fetch_nse_price(self, symbol: str) -> Optional[Decimal]:

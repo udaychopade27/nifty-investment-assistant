@@ -157,6 +157,7 @@ async def execute_investment(
     """
     try:
         from app.infrastructure.db.models import ExecutedInvestmentModel
+        from sqlalchemy import select
         from app.infrastructure.db.repositories.decision_repository import (
             DailyDecisionRepository,
             ETFDecisionRepository,
@@ -174,9 +175,38 @@ async def execute_investment(
         etf_decision_id = None
         capital_bucket = request.capital_bucket.lower()
 
-        # 2. BASE investment → NO decision link
+        # 2. BASE investment → NO decision link (idempotent per symbol per month)
         if capital_bucket == "base":
             etf_decision_id = None
+            today = date.today()
+            month_start = date(today.year, today.month, 1)
+            next_month = date(
+                month_start.year + (1 if month_start.month == 12 else 0),
+                1 if month_start.month == 12 else month_start.month + 1,
+                1
+            )
+            existing = await db.execute(
+                select(ExecutedInvestmentModel)
+                .where(
+                    ExecutedInvestmentModel.capital_bucket == "base",
+                    ExecutedInvestmentModel.etf_symbol == request.etf_symbol,
+                    ExecutedInvestmentModel.executed_at >= month_start,
+                    ExecutedInvestmentModel.executed_at < next_month,
+                )
+                .limit(1)
+            )
+            existing_investment = existing.scalar_one_or_none()
+            if existing_investment:
+                return {
+                    "status": "success",
+                    "id": existing_investment.id,
+                    "capital_bucket": capital_bucket,
+                    "etf_symbol": existing_investment.etf_symbol,
+                    "units": existing_investment.units,
+                    "price": float(existing_investment.executed_price),
+                    "total_amount": float(existing_investment.total_amount),
+                    "decision_linked": False,
+                }
 
         # 3. TACTICAL investment → MUST link today's decision
         elif capital_bucket == "tactical":
@@ -210,6 +240,23 @@ async def execute_investment(
                 )
 
             etf_decision_id = etf_decision.id
+            existing = await db.execute(
+                select(ExecutedInvestmentModel)
+                .where(ExecutedInvestmentModel.etf_decision_id == etf_decision_id)
+                .limit(1)
+            )
+            existing_investment = existing.scalar_one_or_none()
+            if existing_investment:
+                return {
+                    "status": "success",
+                    "id": existing_investment.id,
+                    "capital_bucket": capital_bucket,
+                    "etf_symbol": existing_investment.etf_symbol,
+                    "units": existing_investment.units,
+                    "price": float(existing_investment.executed_price),
+                    "total_amount": float(existing_investment.total_amount),
+                    "decision_linked": True,
+                }
 
         else:
             raise HTTPException(

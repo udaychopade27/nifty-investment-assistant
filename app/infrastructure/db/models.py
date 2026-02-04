@@ -4,8 +4,8 @@ Insert-only audit tables - NO DELETES
 """
 
 from sqlalchemy import (
-    Column, Integer, String, Numeric, Date, DateTime, 
-    Boolean, ForeignKey, Text, Enum as SQLEnum, Index
+    Column, Integer, String, Numeric, Date, DateTime,
+    Boolean, ForeignKey, Text, Enum as SQLEnum, Index, JSON
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -244,6 +244,18 @@ class MarketDataCacheModel(Base):
     __table_args__ = (
         Index('ix_market_data_unique', 'symbol', 'date', unique=True),
     )
+
+
+class BaseInvestmentPlanModel(Base):
+    """Persisted base investment plan per month"""
+    __tablename__ = "base_investment_plan"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(Date, nullable=False, unique=True, index=True)
+    base_capital = Column(Numeric(12, 2), nullable=False)
+    strategy_version = Column(String(50), nullable=False)
+    plan_json = Column(JSON, nullable=False)
+    generated_at = Column(DateTime, nullable=False, default=now_ist_naive)
 
 
 class CarryForwardLogModel(Base):

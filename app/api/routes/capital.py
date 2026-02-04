@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 
 from app.infrastructure.db.database import get_db
 from app.infrastructure.db.repositories.monthly_config_repository import MonthlyConfigRepository
+from app.infrastructure.db.repositories.base_plan_repository import BaseInvestmentPlanRepository
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 from app.infrastructure.db.repositories.carry_forward_repository import CarryForwardLogRepository
 
@@ -319,6 +320,18 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
     config_engine.load_all()
 
     base_allocation = config_engine.base_allocation.allocations
+    month_start = config.month
+
+    base_plan_repo = BaseInvestmentPlanRepository(db)
+    existing_plan = await base_plan_repo.get_for_month(month_start)
+    if existing_plan:
+        return {
+            "month": config.month.strftime("%B %Y"),
+            "base_capital": float(existing_plan.base_capital),
+            "month_source": "auto_current",
+            "base_plan": existing_plan.plan_json.get("base_plan", {}),
+            "note": "Using cached base plan for this month"
+        }
 
     market_provider = YFinanceProvider()
     current_prices = await market_provider.get_current_prices(
@@ -332,6 +345,7 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
 
     unit_engine = UnitCalculationEngine()
     base_plan = {}
+    missing_prices = []
 
     for symbol, allocation_pct in base_allocation.items():
         if allocation_pct == 0:
@@ -341,6 +355,7 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
         ltp = current_prices.get(symbol, Decimal("0"))
 
         if ltp <= 0:
+            missing_prices.append(symbol)
             continue
 
         effective_price = unit_engine.calculate_effective_price(ltp)
@@ -357,10 +372,25 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
             "unused": float(amount - actual_amount)
         }
 
-    return {
+    if missing_prices:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Missing prices for: {', '.join(sorted(missing_prices))}. Try again later."
+        )
+
+    plan_payload = {
         "month": config.month.strftime("%B %Y"),
         "base_capital": float(config.base_capital),
         "month_source": "auto_current",
         "base_plan": base_plan,
         "note": "Execute gradually across trading days"
     }
+
+    await base_plan_repo.create(
+        month=month_start,
+        base_capital=config.base_capital,
+        strategy_version=config.strategy_version,
+        plan_json=plan_payload,
+    )
+
+    return plan_payload
