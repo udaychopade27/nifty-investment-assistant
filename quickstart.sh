@@ -44,12 +44,12 @@ fi
 # Build and start containers
 CURRENT_STEP="building containers"
 echo "🐳 Building Docker containers..."
-docker-compose build
+docker compose build
 
 echo ""
 CURRENT_STEP="starting containers"
 echo "🚀 Starting unified service (API + Scheduler + Telegram)..."
-docker-compose up -d
+docker compose up -d
 
 echo ""
 CURRENT_STEP="waiting for services"
@@ -59,9 +59,9 @@ sleep 15
 # Run database migrations
 CURRENT_STEP="running migrations"
 echo "📊 Running database migrations..."
-docker-compose exec -T app alembic upgrade head 2>/dev/null || {
+docker compose exec -T app alembic upgrade head 2>/dev/null || {
     CURRENT_STEP="fallback init_db"
-    docker-compose exec -T app python -c "
+    docker compose exec -T app python -c "
 import asyncio
 from app.infrastructure.db.database import init_db
 asyncio.run(init_db())
