@@ -1065,8 +1065,27 @@ const ETFDashboard = () => {
     setBasePlan(null);
   };
 
-  const openTradeModal = (type) => {
+  const openTradeModal = async (type) => {
     setTradeType(type);
+    if (type === 'base' && !basePlan) {
+      try {
+        const plan = await APIService.generateBasePlan();
+        const entries = Object.values(plan.base_plan || {});
+        const totals = entries.reduce(
+          (acc, item) => {
+            acc.total_allocated += item.allocated_amount || 0;
+            acc.total_actual += item.actual_amount || 0;
+            acc.total_unused += item.unused || 0;
+            return acc;
+          },
+          { total_allocated: 0, total_actual: 0, total_unused: 0 }
+        );
+        setBasePlan({ ...plan, ...totals });
+      } catch (error) {
+        alert(error.message);
+        return;
+      }
+    }
     setTradeModalOpen(true);
   };
 
@@ -1199,7 +1218,7 @@ const ETFDashboard = () => {
         symbols={[
           ...new Set([
             ...(basePlan ? Object.keys(basePlan.base_plan || {}) : []),
-            ...(portfolio?.holdings || []).map((h) => h.etf_symbol),
+            ...(decision?.etf_decisions || []).map((d) => d.etf_symbol),
           ]),
         ]}
         onSubmit={handleTradeSubmit}
