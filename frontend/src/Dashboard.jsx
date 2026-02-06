@@ -670,7 +670,7 @@ const PortfolioSummary = ({ portfolio }) => {
   );
 };
 
-const BrokerHoldingsCard = ({ broker }) => {
+const BrokerHoldingsCard = ({ broker, lastSyncedAt }) => {
   if (!broker) {
     return (
       <Card className="p-6">
@@ -696,10 +696,16 @@ const BrokerHoldingsCard = ({ broker }) => {
     <Card className="p-6">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-ink-0">Broker Holdings (Upstox)</h2>
-        <div className="text-sm text-ink-1/60">
-          Value: ₹{broker.total_value?.toLocaleString()}
+        <div className="flex items-center space-x-3 text-sm text-ink-1/60">
+          <div>Value: ₹{broker.total_value?.toLocaleString()}</div>
+          <Badge variant="info">
+            Total PnL {broker.total_pnl >= 0 ? "+" : ""}₹{broker.total_pnl?.toLocaleString()}
+          </Badge>
         </div>
       </div>
+      {lastSyncedAt && (
+        <div className="text-xs text-ink-1/60 mb-3">Last synced at {lastSyncedAt}</div>
+      )}
       <div className="space-y-2 text-sm">
         {broker.holdings.map((row) => (
           <div key={row.symbol} className="flex items-center justify-between bg-stone-50 rounded-lg px-3 py-2">
@@ -714,6 +720,46 @@ const BrokerHoldingsCard = ({ broker }) => {
         {broker.holdings.length === 0 && (
           <div className="text-ink-1/60">No broker holdings found.</div>
         )}
+      </div>
+    </Card>
+  );
+};
+
+const CombinedPortfolioSummary = ({ appPortfolio, brokerPortfolio }) => {
+  if (!appPortfolio || !brokerPortfolio || brokerPortfolio.status !== "ok") {
+    return null;
+  }
+
+  const combinedValue = (appPortfolio.current_value || 0) + (brokerPortfolio.total_value || 0);
+  const combinedInvested = (appPortfolio.total_invested || 0) + (brokerPortfolio.total_value || 0);
+  const combinedPnl = (appPortfolio.unrealized_pnl || 0) + (brokerPortfolio.total_pnl || 0);
+  const combinedPnlPct = combinedInvested > 0 ? (combinedPnl / combinedInvested) * 100 : 0;
+  const pnlPositive = combinedPnl >= 0;
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-semibold text-ink-0">Combined Portfolio (App + Broker)</h2>
+        <Badge variant="info">Read-only</Badge>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-stone-50 rounded-xl p-4">
+          <p className="text-xs text-ink-1/60 uppercase tracking-wide">Estimated Invested</p>
+          <p className="text-xl font-bold text-ink-0">₹{combinedInvested.toLocaleString()}</p>
+        </div>
+        <div className="bg-sky-50 rounded-xl p-4">
+          <p className="text-xs text-ink-1/60 uppercase tracking-wide">Current Value</p>
+          <p className="text-xl font-bold text-sky-700">₹{combinedValue.toLocaleString()}</p>
+        </div>
+        <div className="bg-emerald-50 rounded-xl p-4">
+          <p className="text-xs text-ink-1/60 uppercase tracking-wide">PnL</p>
+          <p className={`text-xl font-bold ${pnlPositive ? "text-emerald-700" : "text-rose-700"}`}>
+            {pnlPositive ? "+" : ""}₹{combinedPnl.toLocaleString()}
+          </p>
+          <p className={`text-sm ${pnlPositive ? "text-emerald-700" : "text-rose-700"}`}>
+            {pnlPositive ? "+" : ""}{combinedPnlPct.toFixed(2)}%
+          </p>
+        </div>
       </div>
     </Card>
   );
@@ -1290,6 +1336,7 @@ const ETFDashboard = () => {
   const [decision, setDecision] = useState(null);
   const [portfolio, setPortfolio] = useState(null);
   const [brokerPortfolio, setBrokerPortfolio] = useState(null);
+  const [brokerSyncedAt, setBrokerSyncedAt] = useState(null);
   const [basePlan, setBasePlan] = useState(null);
   const [marketDataStatus, setMarketDataStatus] = useState(null);
   const [marketDataTrace, setMarketDataTrace] = useState(null);
@@ -1324,6 +1371,9 @@ const ETFDashboard = () => {
       setCapital(capitalData);
       setPortfolio(portfolioData);
       setBrokerPortfolio(brokerData);
+      if (brokerData) {
+        setBrokerSyncedAt(new Date().toLocaleString());
+      }
       setTradeHistory(historyData);
       setMarketDataStatus(marketStatus);
       setMarketDataTrace(marketTrace);
@@ -1504,7 +1554,7 @@ const ETFDashboard = () => {
               pageSize={tradePageSize}
             />
             <PortfolioSummary portfolio={portfolio} />
-            <BrokerHoldingsCard broker={brokerPortfolio} />
+            <BrokerHoldingsCard broker={brokerPortfolio} lastSyncedAt={brokerSyncedAt} />
           </div>
           
           {/* Right Column - Capital & Portfolio */}
@@ -1522,6 +1572,7 @@ const ETFDashboard = () => {
               trace={marketDataTrace}
               onRefresh={refreshMarketTrace}
             />
+            <CombinedPortfolioSummary appPortfolio={portfolio} brokerPortfolio={brokerPortfolio} />
           </div>
         </div>
       </div>

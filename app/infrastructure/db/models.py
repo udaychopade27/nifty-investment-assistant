@@ -21,6 +21,7 @@ class DecisionTypeEnum(str, enum.Enum):
     NONE = "NONE"
     SMALL = "SMALL"
     MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
     FULL = "FULL"
 
 

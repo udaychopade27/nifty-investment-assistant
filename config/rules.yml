@@ -13,21 +13,26 @@ capital_rules:
 # Dip Detection Thresholds
 dip_thresholds:
   none:
-    min_change: -1.0             # No dip above -1%
+    min_change: -0.75            # No dip above -0.75%
     tactical_deployment: 0.0
   
   small:
-    min_change: -2.0             # Small dip: -1% to -2%
-    max_change: -1.0
+    min_change: -1.5             # Small dip: -0.75% to -1.5%
+    max_change: -0.75
     tactical_deployment: 25.0    # Deploy 25% tactical
   
   medium:
-    min_change: -3.0             # Medium dip: -2% to -3%
-    max_change: -2.0
+    min_change: -2.5             # Medium dip: -1.5% to -2.5%
+    max_change: -1.5
     tactical_deployment: 50.0    # Deploy 50% tactical
+
+  high:
+    min_change: -3.5             # High dip: -2.5% to -3.5%
+    max_change: -2.5
+    tactical_deployment: 75.0    # Deploy 75% tactical
   
   full:
-    max_change: -3.0             # Full dip: below -3%
+    max_change: -3.5             # Full dip: below -3.5%
     tactical_deployment: 100.0   # Deploy 100% tactical
 
 # Multi-Day Trend Rules

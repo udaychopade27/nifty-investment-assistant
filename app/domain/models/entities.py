@@ -33,6 +33,7 @@ class DecisionType(Enum):
     NONE = "NONE"
     SMALL = "SMALL"
     MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
     FULL = "FULL"
 
 

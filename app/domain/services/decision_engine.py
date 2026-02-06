@@ -186,7 +186,7 @@ class DecisionEngine:
             market_context: Market environment
         
         Returns:
-            Decision type (NONE/SMALL/MEDIUM/FULL)
+            Decision type (NONE/SMALL/MEDIUM/HIGH/FULL)
         """
         daily_change = market_context.daily_change_pct
         three_day_change = market_context.cumulative_3day_pct
@@ -196,14 +196,16 @@ class DecisionEngine:
             return DecisionType.MEDIUM
         
         # Determine based on daily change
-        if daily_change >= Decimal('-1.0'):
+        if daily_change >= Decimal('-0.75'):
             return DecisionType.NONE  # No dip
-        elif daily_change >= Decimal('-2.0'):
-            return DecisionType.SMALL  # -1% to -2%
-        elif daily_change >= Decimal('-3.0'):
-            return DecisionType.MEDIUM  # -2% to -3%
+        elif daily_change >= Decimal('-1.5'):
+            return DecisionType.SMALL  # -0.75% to -1.5%
+        elif daily_change >= Decimal('-2.5'):
+            return DecisionType.MEDIUM  # -1.5% to -2.5%
+        elif daily_change >= Decimal('-3.5'):
+            return DecisionType.HIGH  # -2.5% to -3.5%
         else:
-            return DecisionType.FULL  # Below -3%
+            return DecisionType.FULL  # Below -3.5%
     
     def _calculate_deployable_amounts(
         self,
@@ -241,6 +243,8 @@ class DecisionEngine:
                 tactical_pct = Decimal('25')
             elif decision_type == DecisionType.MEDIUM:
                 tactical_pct = Decimal('50')
+            elif decision_type == DecisionType.HIGH:
+                tactical_pct = Decimal('75')
             elif decision_type == DecisionType.FULL:
                 tactical_pct = Decimal('100')
         
@@ -366,6 +370,8 @@ class DecisionEngine:
 
         if tier == "full":
             return DecisionType.FULL, self._get_tactical_deploy_pct("full")
+        if tier == "high":
+            return DecisionType.HIGH, self._get_tactical_deploy_pct("high")
         if tier == "medium":
             return DecisionType.MEDIUM, self._get_tactical_deploy_pct("medium")
         if tier == "small":
@@ -377,10 +383,13 @@ class DecisionEngine:
         Map a % change to dip tier using configured thresholds.
         """
         full_cfg = self.dip_thresholds.get('full', {})
+        high_cfg = self.dip_thresholds.get('high', {})
         med_cfg = self.dip_thresholds.get('medium', {})
         small_cfg = self.dip_thresholds.get('small', {})
 
         full_max = full_cfg.get('max_change')
+        high_min = high_cfg.get('min_change')
+        high_max = high_cfg.get('max_change')
         med_min = med_cfg.get('min_change')
         med_max = med_cfg.get('max_change')
         small_min = small_cfg.get('min_change')
@@ -388,6 +397,9 @@ class DecisionEngine:
 
         if full_max is not None and change_pct <= Decimal(str(full_max)):
             return "full"
+        if high_min is not None and high_max is not None:
+            if Decimal(str(high_min)) < change_pct <= Decimal(str(high_max)):
+                return "high"
         if med_min is not None and med_max is not None:
             if Decimal(str(med_min)) < change_pct <= Decimal(str(med_max)):
                 return "medium"
@@ -463,11 +475,13 @@ class DecisionEngine:
         if decision_type == DecisionType.NONE:
             parts.append("No dip detected. Base capital only.")
         elif decision_type == DecisionType.SMALL:
-            parts.append("Small dip (-1% to -2%). Deploying 25% tactical.")
+            parts.append("Small dip (-0.75% to -1.5%). Deploying 25% tactical.")
         elif decision_type == DecisionType.MEDIUM:
-            parts.append("Medium dip (-2% to -3%) or 3-day fall. Deploying 50% tactical.")
+            parts.append("Medium dip (-1.5% to -2.5%) or 3-day fall. Deploying 50% tactical.")
+        elif decision_type == DecisionType.HIGH:
+            parts.append("High dip (-2.5% to -3.5%). Deploying 75% tactical.")
         elif decision_type == DecisionType.FULL:
-            parts.append("Full dip (>-3%). Deploying 100% tactical.")
+            parts.append("Full dip (< -3.5%). Deploying 100% tactical.")
         
         # Capital breakdown
         if base_amount > Decimal('0') or tactical_amount > Decimal('0'):
