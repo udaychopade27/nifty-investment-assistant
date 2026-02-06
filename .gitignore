@@ -68,8 +68,8 @@ htmlcov/
 dmypy.json
 
 # Alembic
-alembic/versions/*.py
-!alembic/versions/__init__.py
+# alembic/versions/*.py
+# !alembic/versions/__init__.py
 
 # Backup files
 *.bak
