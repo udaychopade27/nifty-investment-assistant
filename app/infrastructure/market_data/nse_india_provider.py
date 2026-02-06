@@ -251,10 +251,11 @@ class NSEIndiaProvider:
         try:
             data = await self._request_json(self.INDEX_URL)
             if data:
-                
+                target = self._normalize_index_name(index_name)
                 # Find matching index
                 for index in data.get('data', []):
-                    if index_name.upper() in index.get('index', '').upper():
+                    candidate = self._normalize_index_name(index.get('index', ''))
+                    if target in candidate:
                         price = index.get('last') or index.get('lastPrice')
                         if price:
                             return Decimal(str(price))
@@ -274,8 +275,10 @@ class NSEIndiaProvider:
             if not data:
                 return None
 
+            target = self._normalize_index_name(index_name)
             for index in data.get('data', []):
-                if index_name.upper() in index.get('index', '').upper():
+                candidate = self._normalize_index_name(index.get('index', ''))
+                if target in candidate:
                     last = index.get('last') or index.get('lastPrice')
                     prev = (
                         index.get('previousClose')
@@ -322,6 +325,11 @@ class NSEIndiaProvider:
 
         change = ((last - prev) / prev) * Decimal("100")
         return change.quantize(Decimal("0.01"))
+
+    @staticmethod
+    def _normalize_index_name(value: str) -> str:
+        """Normalize index name for fuzzy matching."""
+        return "".join(ch for ch in (value or "").upper() if ch.isalnum())
     
     async def get_current_prices(self, symbols: List[str]) -> Dict[str, Decimal]:
         """

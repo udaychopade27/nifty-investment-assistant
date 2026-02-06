@@ -39,6 +39,9 @@ class YFinanceProvider:
             "MIDCAPETF": "MIDCAPETF.NS",
             "NIF100BEES": "NIF100BEES.NS",
             "HDFCGOLD": "HDFCGOLD.NS",
+            # Index fallbacks via closest ETF proxies on Yahoo
+            "NIFTY VALUE 20": "ICICIVALUE.NS",
+            "NIFTY200 MOMENTUM 30": "ICICIMOM30.NS",
             "NIFTY50": "^NSEI",
             "NIFTY 50": "^NSEI",
             "INDIA_VIX": "^INDIAVIX",

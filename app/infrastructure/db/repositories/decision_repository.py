@@ -209,6 +209,24 @@ class ETFDecisionRepository:
         model = result.scalar_one_or_none()
         
         return self._to_domain(model) if model else None
+
+    async def get_by_decision_and_symbol(
+        self,
+        daily_decision_id: int,
+        etf_symbol: str
+    ) -> Optional[ETFDecision]:
+        """
+        Get ETF decision by daily decision ID and symbol
+        """
+        result = await self.session.execute(
+            select(ETFDecisionModel)
+            .where(
+                ETFDecisionModel.daily_decision_id == daily_decision_id,
+                ETFDecisionModel.etf_symbol == etf_symbol
+            )
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
     
     @staticmethod
     def _to_domain(model: Optional[ETFDecisionModel]) -> Optional[ETFDecision]:

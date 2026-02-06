@@ -231,6 +231,7 @@ docker-compose up -d
 ```bash
 docker-compose exec app alembic upgrade head
 ```
+Note: auto-creating tables on app startup is disabled by default. To enable it for dev-only use, set `AUTO_CREATE_TABLES=true` in `.env`. In production, rely on Alembic migrations.
 
 5. **Start Services**
 ```bash
@@ -285,6 +286,23 @@ docker-compose exec app pytest --cov=app
 
 # Run specific engine tests
 docker-compose exec app pytest tests/domain/services/test_decision_engine.py
+```
+
+## 📦 Upstox Instruments Mapping
+
+Auto-map ETF symbols from `config/etfs.yml` (plus NIFTY50 and INDIA_VIX) to Upstox instrument keys:
+
+```bash
+python scripts/upstox_map_etfs.py \
+  --instruments /tmp/instruments.json.gz \
+  --download-url "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz" \
+  --write config/app.yml
+```
+
+Optional alias for convenience:
+
+```bash
+alias upstox-map='python scripts/upstox_map_etfs.py --instruments /tmp/instruments.json.gz --download-url "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz" --write config/app.yml'
 ```
 
 ## 📊 Example Decision Flow

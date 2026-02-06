@@ -132,6 +132,10 @@ class APIService {
     return this.get('/api/v1/portfolio/pnl');
   }
 
+  static getBrokerHoldings() {
+    return this.get('/api/v1/portfolio/broker-holdings');
+  }
+
   static getInvestmentHistory(bucket = 'all', limit = 20) {
     return this.get(`/api/v1/invest/history/${bucket}?limit=${limit}`);
   }
@@ -150,6 +154,19 @@ class APIService {
       this.get('/api/v1/config/allocations/base'),
       this.get('/api/v1/config/allocations/tactical')
     ]);
+  }
+
+  // Market Data APIs
+  static getMarketDataStatus() {
+    return this.get('/api/v1/market-data/status');
+  }
+
+  static getMarketDataTrace() {
+    return this.get('/api/v1/market-data/trace');
+  }
+
+  static setUpstoxToken(token) {
+    return this.post('/api/v1/market-data/upstox/token', { token, source: 'frontend' });
   }
 }
 
@@ -414,6 +431,173 @@ const CapitalOverview = ({ capital, onSetCapital, onViewBasePlan }) => {
   );
 };
 
+// Market Data Status Component
+const MarketDataStatus = ({ status, onUpdateToken }) => {
+  if (!status) {
+    return (
+      <Card className="p-6">
+        <div className="text-center py-6">
+          <Activity className="h-10 w-10 text-gray-300 mx-auto mb-2" />
+          <p className="text-gray-600">Loading market data status...</p>
+        </div>
+      </Card>
+    );
+  }
+
+  const provider = status.provider || 'unknown';
+  const upstox = status.upstox;
+  const needsRefresh = upstox?.needs_refresh;
+  const lastUpdated = upstox?.last_updated ? new Date(upstox.last_updated).toLocaleString() : 'Never';
+  const maskedToken = upstox?.masked_token || 'Not set';
+  const apiKeySet = status.upstox_api_key_configured;
+  const apiSecretSet = status.upstox_api_secret_configured;
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center space-x-3">
+          <Shield className="h-5 w-5 text-primary-600" />
+          <h2 className="text-lg font-semibold text-ink-0">Market Data</h2>
+        </div>
+        <Badge variant={provider === 'upstox' ? 'info' : 'default'}>
+          {provider.toUpperCase()}
+        </Badge>
+      </div>
+
+      <div className="space-y-3 text-sm">
+        <div className="flex justify-between">
+          <span className="text-ink-1/70">Fallbacks:</span>
+          <span className="font-medium">{(status.fallback_providers || []).join(", ") || 'None'}</span>
+        </div>
+
+        {provider === 'upstox' && (
+          <>
+            <div className="flex justify-between">
+              <span className="text-ink-1/70">API Key:</span>
+              <Badge variant={apiKeySet ? 'success' : 'warning'}>
+                {apiKeySet ? 'Set' : 'Missing'}
+              </Badge>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-ink-1/70">API Secret:</span>
+              <Badge variant={apiSecretSet ? 'success' : 'warning'}>
+                {apiSecretSet ? 'Set' : 'Missing'}
+              </Badge>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-ink-1/70">Token:</span>
+              <span className="font-mono">{maskedToken}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-ink-1/70">Last Updated:</span>
+              <span className="font-medium">{lastUpdated}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-ink-1/70">Refresh Needed:</span>
+              <Badge variant={needsRefresh ? 'danger' : 'success'}>
+                {needsRefresh ? 'Yes' : 'No'}
+              </Badge>
+            </div>
+            <Button
+              variant={needsRefresh ? 'danger' : 'secondary'}
+              size="sm"
+              onClick={onUpdateToken}
+            >
+              Update Token
+            </Button>
+          </>
+        )}
+      </div>
+    </Card>
+  );
+};
+
+// Market Data Trace Component
+const MarketDataTrace = ({ trace, onRefresh }) => {
+  if (!trace) {
+    return (
+      <Card className="p-6">
+        <div className="text-center py-6">
+          <Activity className="h-10 w-10 text-gray-300 mx-auto mb-2" />
+          <p className="text-gray-600">Loading data sources...</p>
+        </div>
+      </Card>
+    );
+  }
+
+  const prices = trace.prices || {};
+  const indices = trace.indices || {};
+  const priceRows = Object.entries(prices);
+  const indexRows = Object.entries(indices);
+  const getIndexRowClass = (value) => {
+    if (value === null || value === undefined) {
+      return "bg-sky-50";
+    }
+    const num = Number(value);
+    if (Number.isNaN(num)) {
+      return "bg-sky-50";
+    }
+    if (num > 0) return "bg-emerald-50";
+    if (num < 0) return "bg-rose-50";
+    return "bg-sky-50";
+  };
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center space-x-3">
+          <Activity className="h-5 w-5 text-primary-600" />
+          <h2 className="text-lg font-semibold text-ink-0">Data Sources</h2>
+        </div>
+        <Button variant="secondary" size="sm" onClick={onRefresh}>
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+      </div>
+
+      <div className="space-y-4 text-sm">
+        <div>
+          <p className="text-xs uppercase tracking-wide text-ink-1/60 mb-2">ETF Prices</p>
+          <div className="space-y-2">
+            {priceRows.map(([symbol, row]) => (
+              <div key={symbol} className="flex items-center justify-between bg-stone-50 rounded-lg px-3 py-2">
+                <div className="font-medium text-ink-0">{symbol}</div>
+                <div className="flex items-center space-x-3">
+                  <span className="text-ink-1/70">₹{row.price ?? '-'}</span>
+                  <Badge variant="info">{(row.source || 'unknown').toUpperCase()}</Badge>
+                </div>
+              </div>
+            ))}
+            {priceRows.length === 0 && (
+              <div className="text-ink-1/60">No prices available.</div>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <p className="text-xs uppercase tracking-wide text-ink-1/60 mb-2">Underlying Index Changes</p>
+          <div className="space-y-2">
+            {indexRows.map(([indexName, row]) => (
+              <div
+                key={indexName}
+                className={`flex items-center justify-between rounded-lg px-3 py-2 ${getIndexRowClass(row.change_pct)}`}
+              >
+                <div className="font-medium text-ink-0">{indexName}</div>
+                <div className="flex items-center space-x-3">
+                  <span className="text-ink-1/70">{row.change_pct ?? '-' }%</span>
+                  <Badge variant="info">{(row.source || 'unknown').toUpperCase()}</Badge>
+                </div>
+              </div>
+            ))}
+            {indexRows.length === 0 && (
+              <div className="text-ink-1/60">No index data available.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+};
+
 // Portfolio Summary Component
 const PortfolioSummary = ({ portfolio }) => {
   if (!portfolio) {
@@ -480,6 +664,55 @@ const PortfolioSummary = ({ portfolio }) => {
           <div className="text-xs text-ink-1/70">
             Prices missing for: {portfolio.prices_missing.join(", ")}
           </div>
+        )}
+      </div>
+    </Card>
+  );
+};
+
+const BrokerHoldingsCard = ({ broker }) => {
+  if (!broker) {
+    return (
+      <Card className="p-6">
+        <div className="text-center py-6 text-ink-1/60">Broker holdings unavailable.</div>
+      </Card>
+    );
+  }
+
+  if (broker.status !== "ok") {
+    return (
+      <Card className="p-6">
+        <div className="text-sm text-ink-1/70">
+          Broker holdings unavailable.
+        </div>
+        {broker.error && (
+          <div className="text-xs text-ink-1/60 mt-2">{broker.error}</div>
+        )}
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-semibold text-ink-0">Broker Holdings (Upstox)</h2>
+        <div className="text-sm text-ink-1/60">
+          Value: ₹{broker.total_value?.toLocaleString()}
+        </div>
+      </div>
+      <div className="space-y-2 text-sm">
+        {broker.holdings.map((row) => (
+          <div key={row.symbol} className="flex items-center justify-between bg-stone-50 rounded-lg px-3 py-2">
+            <div className="font-medium text-ink-0">{row.symbol}</div>
+            <div className="flex items-center space-x-3 text-ink-1/70">
+              <span>{row.quantity} units</span>
+              <span>₹{row.last_price}</span>
+              <span>₹{row.current_value?.toLocaleString()}</span>
+            </div>
+          </div>
+        ))}
+        {broker.holdings.length === 0 && (
+          <div className="text-ink-1/60">No broker holdings found.</div>
         )}
       </div>
     </Card>
@@ -701,6 +934,71 @@ const SetCapitalModal = ({ isOpen, onClose, onSubmit }) => {
             </Button>
             <Button variant="primary" className="flex-1" onClick={handleSubmit} disabled={loading}>
               {loading ? 'Setting...' : 'Confirm'}
+            </Button>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+// Set Upstox Token Modal
+const SetTokenModal = ({ isOpen, onClose, onSubmit }) => {
+  const [token, setToken] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async () => {
+    if (!token || token.length < 10) {
+      alert('Please enter a valid Upstox token');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await onSubmit(token.trim());
+      setToken('');
+      onClose();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <Card className="max-w-md w-full p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-xl font-bold text-gray-900">Update Upstox Token</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Upstox Access Token
+            </label>
+            <textarea
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="Paste your Upstox access token here"
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent h-28"
+            />
+            <p className="text-sm text-gray-500 mt-2">
+              Tokens expire daily. Update before market opens (9:00 AM).
+            </p>
+          </div>
+
+          <div className="flex space-x-3">
+            <Button variant="secondary" className="flex-1" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button variant="primary" className="flex-1" onClick={handleSubmit} disabled={loading}>
+              {loading ? 'Saving...' : 'Save Token'}
             </Button>
           </div>
         </div>
@@ -991,9 +1289,13 @@ const ETFDashboard = () => {
   const [capital, setCapital] = useState(null);
   const [decision, setDecision] = useState(null);
   const [portfolio, setPortfolio] = useState(null);
+  const [brokerPortfolio, setBrokerPortfolio] = useState(null);
   const [basePlan, setBasePlan] = useState(null);
+  const [marketDataStatus, setMarketDataStatus] = useState(null);
+  const [marketDataTrace, setMarketDataTrace] = useState(null);
   const [showCapitalModal, setShowCapitalModal] = useState(false);
   const [showBasePlanModal, setShowBasePlanModal] = useState(false);
+  const [showTokenModal, setShowTokenModal] = useState(false);
   const [tradeModalOpen, setTradeModalOpen] = useState(false);
   const [tradeType, setTradeType] = useState('base');
   const [tradeHistory, setTradeHistory] = useState(null);
@@ -1010,15 +1312,21 @@ const ETFDashboard = () => {
   const loadDashboardData = async () => {
     setLoading(true);
     try {
-      const [capitalData, portfolioData, historyData] = await Promise.all([
+      const [capitalData, portfolioData, brokerData, historyData, marketStatus, marketTrace] = await Promise.all([
         APIService.getCapital().catch(() => null),
         APIService.getPnl().catch(() => null),
-        APIService.getInvestmentHistory('all', 200).catch(() => null)
+        APIService.getBrokerHoldings().catch(() => null),
+        APIService.getInvestmentHistory('all', 200).catch(() => null),
+        APIService.getMarketDataStatus().catch(() => null),
+        APIService.getMarketDataTrace().catch(() => null)
       ]);
       
       setCapital(capitalData);
       setPortfolio(portfolioData);
+      setBrokerPortfolio(brokerData);
       setTradeHistory(historyData);
+      setMarketDataStatus(marketStatus);
+      setMarketDataTrace(marketTrace);
       
       // Load decision
       try {
@@ -1037,6 +1345,19 @@ const ETFDashboard = () => {
   const handleSetCapital = async (amount) => {
     await APIService.setCapital(amount);
     await loadDashboardData();
+  };
+
+  const handleSetUpstoxToken = async (token) => {
+    await APIService.setUpstoxToken(token);
+    const status = await APIService.getMarketDataStatus().catch(() => null);
+    setMarketDataStatus(status);
+    const trace = await APIService.getMarketDataTrace().catch(() => null);
+    setMarketDataTrace(trace);
+  };
+
+  const refreshMarketTrace = async () => {
+    const trace = await APIService.getMarketDataTrace().catch(() => null);
+    setMarketDataTrace(trace);
   };
   
   const handleViewBasePlan = async () => {
@@ -1143,8 +1464,8 @@ const ETFDashboard = () => {
         </div>
         
         {/* Main Content Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column - Decision & Capital */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+          {/* Left Column - Decision & Activity */}
           <div className="lg:col-span-2 space-y-6">
             <TodayDecision decision={decision} onInvest={() => openTradeModal('tactical')} />
             
@@ -1170,16 +1491,7 @@ const ETFDashboard = () => {
                 </Button>
               </div>
             </Card>
-          </div>
-          
-          {/* Right Column - Capital & Portfolio */}
-          <div className="space-y-6">
-            <CapitalOverview 
-              capital={capital} 
-              onSetCapital={() => setShowCapitalModal(true)}
-              onViewBasePlan={handleViewBasePlan}
-            />
-            <PortfolioSummary portfolio={portfolio} />
+
             <TradeHistoryPanel
               history={tradeHistory}
               filter={tradeFilter}
@@ -1191,6 +1503,25 @@ const ETFDashboard = () => {
               onPageChange={setTradePage}
               pageSize={tradePageSize}
             />
+            <PortfolioSummary portfolio={portfolio} />
+            <BrokerHoldingsCard broker={brokerPortfolio} />
+          </div>
+          
+          {/* Right Column - Capital & Portfolio */}
+          <div className="space-y-6">
+            <CapitalOverview 
+              capital={capital} 
+              onSetCapital={() => setShowCapitalModal(true)}
+              onViewBasePlan={handleViewBasePlan}
+            />
+            <MarketDataStatus
+              status={marketDataStatus}
+              onUpdateToken={() => setShowTokenModal(true)}
+            />
+            <MarketDataTrace
+              trace={marketDataTrace}
+              onRefresh={refreshMarketTrace}
+            />
           </div>
         </div>
       </div>
@@ -1200,6 +1531,12 @@ const ETFDashboard = () => {
         isOpen={showCapitalModal}
         onClose={() => setShowCapitalModal(false)}
         onSubmit={handleSetCapital}
+      />
+
+      <SetTokenModal
+        isOpen={showTokenModal}
+        onClose={() => setShowTokenModal(false)}
+        onSubmit={handleSetUpstoxToken}
       />
       
       <BasePlanModal

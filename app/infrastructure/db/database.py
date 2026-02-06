@@ -62,6 +62,8 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db():
     """Initialize database (create tables)"""
+    if os.getenv("AUTO_CREATE_TABLES", "false").lower() not in ("1", "true", "yes", "on"):
+        return
     async with engine.begin() as conn:
         # Import all models here to ensure they're registered
         from app.infrastructure.db import models

@@ -37,10 +37,18 @@ class Settings(BaseSettings):
     TELEGRAM_ENABLED: bool = True
     TELEGRAM_CHAT_ID: str = ""  # Optional
     API_BASE_URL: str = "http://localhost:8000"
+
+    # Upstox Market Data
+    UPSTOX_API_BASE_URL: str = "https://api.upstox.com"
+    UPSTOX_API_KEY: str = ""
+    UPSTOX_API_SECRET: str = ""
+    UPSTOX_ACCESS_TOKEN: str = ""
+    UPSTOX_TOKEN_REMINDER_TIME: str = "09:00"
     # Scheduler
     SCHEDULER_ENABLED: bool = True
     DAILY_DECISION_TIME: str = "15:15"
     MONTHLY_SUMMARY_TIME: str = "18:00"
+    AUTO_CREATE_TABLES: str = "false"
     
     class Config:
         env_file = ".env"

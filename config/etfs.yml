@@ -27,30 +27,6 @@ etfs:
     risk_level: medium_high
     expense_ratio: 0.28
 
-  - symbol: NIF100BEES
-    name: Nippon India ETF Nifty 100
-    category: core_plus
-    asset_class: equity
-    underlying_index: NIFTY 100
-    description: Tracks Nifty 100 index (Large + Upper Mid Cap)
-    exchange: NSE
-    lot_size: 1
-    is_active: true
-    risk_level: medium
-    expense_ratio: 0.20
-
-  - symbol: LOWVOLIETF
-    name: ICICI Prudential Nifty Low Vol 30 ETF
-    category: defensive
-    asset_class: equity
-    underlying_index: NIFTY LOW VOLATILITY 30
-    description: Low volatility strategy
-    exchange: NSE
-    lot_size: 1
-    is_active: true
-    risk_level: low_medium
-    expense_ratio: 0.25
-
   - symbol: MIDCAPETF
     name: ICICI Prudential Nifty Midcap 150 ETF
     category: growth
@@ -62,6 +38,30 @@ etfs:
     is_active: true
     risk_level: high
     expense_ratio: 0.25
+
+  - symbol: ICICIVALUE
+    name: ICICI Prudential Nifty Value 20 ETF
+    category: factor_value
+    asset_class: equity
+    underlying_index: NIFTY VALUE 20
+    description: Value factor ETF tracking undervalued companies
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: medium_high
+    expense_ratio: 0.30
+
+  - symbol: ICICIMOM30
+    name: ICICI Prudential Nifty200 Momentum 30 ETF
+    category: factor_momentum
+    asset_class: equity
+    underlying_index: NIFTY200 MOMENTUM 30
+    description: Momentum factor ETF tracking trending stocks
+    exchange: NSE
+    lot_size: 1
+    is_active: true
+    risk_level: high
+    expense_ratio: 0.30
 
   - symbol: HDFCGOLD
     name: HDFC Gold ETF
@@ -77,8 +77,8 @@ etfs:
 
 # ETF Metadata
 metadata:
-  version: "1.2"
-  last_updated: "2026-02-04"
+  version: "2.0"
+  last_updated: "2026-02-06"
   total_etfs: 6
 
 # Exchange Settings

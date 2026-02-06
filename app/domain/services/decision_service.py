@@ -15,7 +15,7 @@ import logging
 from app.domain.services.decision_engine import DecisionEngine
 from app.domain.services.market_context_engine import MarketContextEngine
 from app.domain.services.capital_engine import CapitalEngine
-from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
+from app.infrastructure.market_data.types import MarketDataProvider
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 from app.infrastructure.db.repositories.monthly_config_repository import MonthlyConfigRepository
 from app.infrastructure.db.repositories.decision_repository import (
@@ -40,7 +40,7 @@ class DecisionService:
         decision_engine: DecisionEngine,
         market_context_engine: MarketContextEngine,
         capital_engine: CapitalEngine,  # ✅ ADDED: CapitalEngine
-        market_data_provider: YFinanceProvider,
+        market_data_provider: MarketDataProvider,
         nse_calendar: NSECalendar,
         monthly_config_repo: MonthlyConfigRepository,
         daily_decision_repo: DailyDecisionRepository,

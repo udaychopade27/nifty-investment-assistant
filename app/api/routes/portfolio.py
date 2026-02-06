@@ -9,15 +9,42 @@ from pydantic import BaseModel
 from typing import List, Optional
 from decimal import Decimal
 import logging
+from pathlib import Path
 
 from app.infrastructure.db.database import get_db
 from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
 from app.infrastructure.db.repositories.sell_repository import ExecutedSellRepository
+from app.infrastructure.market_data.provider_factory import get_market_data_provider
 from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
+from app.infrastructure.market_data.upstox_provider import UpstoxProvider
+from app.domain.services.config_engine import ConfigEngine
+from app.config import settings
 from app.utils.time import now_ist_naive
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _get_market_provider():
+    try:
+        return get_market_data_provider()
+    except Exception:
+        return YFinanceProvider()
+
+
+def _get_upstox_provider() -> UpstoxProvider:
+    config_dir = Path(__file__).resolve().parents[3] / "config"
+    config_engine = ConfigEngine(config_dir)
+    config_engine.load_all()
+    market_cfg = config_engine.get_app_setting("market_data")
+    upstox_cfg = market_cfg.get("upstox", {})
+    return UpstoxProvider(
+        api_base_url=upstox_cfg.get("api_base_url", "https://api.upstox.com"),
+        api_key=(settings.UPSTOX_API_KEY or "").strip() or None,
+        api_secret=(settings.UPSTOX_API_SECRET or "").strip() or None,
+        instrument_keys=upstox_cfg.get("instrument_keys", {}),
+        cache_ttl_seconds=int(upstox_cfg.get("cache_ttl", 60)),
+    )
 
 
 # Response models
@@ -53,6 +80,25 @@ class PortfolioPnlResponse(BaseModel):
     holdings: List[HoldingResponse]
 
 
+class BrokerHoldingResponse(BaseModel):
+    symbol: str
+    quantity: int
+    average_price: float
+    last_price: float
+    current_value: float
+    pnl: float
+    day_change_pct: Optional[float] = None
+    source: str = "upstox"
+
+
+class BrokerPortfolioResponse(BaseModel):
+    status: str
+    holdings: List[BrokerHoldingResponse]
+    total_value: float
+    total_pnl: float
+    error: Optional[str] = None
+
+
 @router.get("/holdings", response_model=List[HoldingResponse])
 async def get_holdings(db: AsyncSession = Depends(get_db)):
     """
@@ -71,7 +117,7 @@ async def get_holdings(db: AsyncSession = Depends(get_db)):
             return []
         
         # Fetch current prices
-        market_provider = YFinanceProvider()
+        market_provider = _get_market_provider()
         etf_symbols = [h['etf_symbol'] for h in holdings_data]
         current_prices = await market_provider.get_current_prices(etf_symbols)
         prices_missing = [s for s in etf_symbols if s not in current_prices]
@@ -139,7 +185,7 @@ async def get_portfolio_summary(db: AsyncSession = Depends(get_db)):
             )
         
         # Fetch current prices
-        market_provider = YFinanceProvider()
+        market_provider = _get_market_provider()
         etf_symbols = [h['etf_symbol'] for h in holdings_data]
         current_prices = await market_provider.get_current_prices(etf_symbols)
         prices_missing = [s for s in etf_symbols if s not in current_prices]
@@ -226,7 +272,7 @@ async def get_portfolio_pnl(db: AsyncSession = Depends(get_db)):
                 holdings=[]
             )
 
-        market_provider = YFinanceProvider()
+        market_provider = get_market_data_provider()
         etf_symbols = [h['etf_symbol'] for h in holdings_data]
         current_prices = await market_provider.get_current_prices(etf_symbols)
         prices_missing = [s for s in etf_symbols if s not in current_prices]
@@ -284,6 +330,72 @@ async def get_portfolio_pnl(db: AsyncSession = Depends(get_db)):
         )
 
 
+@router.get("/broker-holdings", response_model=BrokerPortfolioResponse)
+async def get_broker_holdings():
+    """
+    Read-only broker holdings from Upstox (long-term holdings).
+    """
+    try:
+        provider = _get_upstox_provider()
+        data = await provider.get_holdings()
+        if data is None:
+            return BrokerPortfolioResponse(
+                status="unavailable",
+                holdings=[],
+                total_value=0.0,
+                total_pnl=0.0,
+                error="Upstox holdings unavailable (token missing or API error)."
+            )
+
+        holdings = []
+        total_value = 0.0
+        total_pnl = 0.0
+
+        for row in data:
+            symbol = row.get("trading_symbol") or row.get("symbol") or "UNKNOWN"
+            qty = int(row.get("quantity") or 0)
+            avg_price = float(row.get("average_price") or 0)
+            last_price = float(row.get("last_price") or row.get("ltp") or 0)
+            pnl = float(row.get("pnl") or 0)
+            day_change_pct = row.get("day_change_percentage")
+            if day_change_pct is not None:
+                try:
+                    day_change_pct = float(day_change_pct)
+                except Exception:
+                    day_change_pct = None
+
+            current_value = qty * last_price
+            total_value += current_value
+            total_pnl += pnl
+
+            holdings.append(
+                BrokerHoldingResponse(
+                    symbol=symbol,
+                    quantity=qty,
+                    average_price=avg_price,
+                    last_price=last_price,
+                    current_value=current_value,
+                    pnl=pnl,
+                    day_change_pct=day_change_pct,
+                )
+            )
+
+        return BrokerPortfolioResponse(
+            status="ok",
+            holdings=holdings,
+            total_value=total_value,
+            total_pnl=total_pnl,
+        )
+    except Exception as e:
+        return BrokerPortfolioResponse(
+            status="error",
+            holdings=[],
+            total_value=0.0,
+            total_pnl=0.0,
+            error=str(e),
+        )
+
+
 @router.get("/allocation")
 async def get_current_allocation(db: AsyncSession = Depends(get_db)):
     """
@@ -303,7 +415,7 @@ async def get_current_allocation(db: AsyncSession = Depends(get_db)):
             }
         
         # Fetch current prices for accurate allocation
-        market_provider = YFinanceProvider()
+        market_provider = get_market_data_provider()
         etf_symbols = [h['etf_symbol'] for h in holdings_data]
         current_prices = {}
         
@@ -375,7 +487,7 @@ async def get_performance_metrics(db: AsyncSession = Depends(get_db)):
             }
         
         # Fetch current prices
-        market_provider = YFinanceProvider()
+        market_provider = get_market_data_provider()
         total_invested = sum(float(h['total_invested']) for h in holdings_data)
         
         current_prices = {}

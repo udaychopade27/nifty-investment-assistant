@@ -22,7 +22,7 @@ import pytz
 from app.config import settings
 from app.infrastructure.db.database import async_session_factory
 from app.infrastructure.calendar.nse_calendar import NSECalendar
-from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
+from app.infrastructure.market_data.provider_factory import get_market_data_provider
 from app.infrastructure.db.repositories.monthly_config_repository import MonthlyConfigRepository
 from app.infrastructure.db.repositories.decision_repository import DailyDecisionRepository, ETFDecisionRepository
 from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
@@ -38,6 +38,10 @@ from app.domain.services.decision_engine import DecisionEngine
 from app.domain.services.decision_service import DecisionService
 from app.infrastructure.db.models import DailyDecisionModel, ETFDecisionModel, MonthlySummaryModel
 from app.utils.notifications import send_telegram_message
+from app.utils.logging_redaction import install_redaction_filter
+from app.domain.services.api_token_service import ApiTokenService
+from app.domain.services.rebalance_service import AnnualRebalanceService
+from app.domain.models import AssetClass
 
 # Set process timezone to IST for logging
 os.environ["TZ"] = "Asia/Kolkata"
@@ -49,6 +53,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+install_redaction_filter()
 
 # Reduce noisy loggers in scheduler process
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
@@ -168,14 +173,14 @@ class ETFScheduler:
                 logger.info("✅ CapitalEngine initialized")
                 
                 # Initialize other engines
-                market_provider = YFinanceProvider()
+                market_provider = get_market_data_provider(self.config_engine)
                 market_context_engine = MarketContextEngine()
                 
                 etf_dict = {etf.symbol: etf for etf in self.config_engine.etf_universe.etfs}
                 etf_index_map = {
                     etf.symbol: etf.underlying_index
                     for etf in self.config_engine.etf_universe.etfs
-                    if etf.underlying_index
+                    if etf.underlying_index and etf.asset_class != AssetClass.GOLD
                 }
                 allocation_engine = AllocationEngine(
                     risk_constraints=self.config_engine.risk_constraints,
@@ -219,11 +224,15 @@ class ETFScheduler:
                 
                 # Generate decision (service will fetch capital state and pass it to engine)
                 daily_decision, etf_decisions = await decision_service.generate_decision_for_date(today)
-                
+
                 logger.info(f"✅ Decision generated: {daily_decision.decision_type.value}")
                 logger.info(f"   Suggested: ₹{daily_decision.suggested_total_amount:,.2f}")
                 logger.info(f"   Investable: ₹{daily_decision.actual_investable_amount:,.2f}")
                 logger.info(f"   ETF Decisions: {len(etf_decisions)}")
+
+                # Persist changes
+                await session.commit()
+                logger.info("✅ Decision committed to DB (id=%s)", daily_decision.id)
                 
                 # Send Telegram notification
                 await self.notifier.send_decision_notification(daily_decision, etf_decisions)
@@ -234,6 +243,11 @@ class ETFScheduler:
             logger.error(f"❌ Daily decision job failed: {e}")
             import traceback
             traceback.print_exc()
+            try:
+                async with async_session_factory() as session:
+                    await session.rollback()
+            except Exception:
+                pass
             try:
                 await send_telegram_message(f"❌ Daily decision job failed: {e}")
             except Exception:
@@ -492,7 +506,7 @@ class ETFScheduler:
                     logger.warning("⚠️  No monthly config to generate base plan")
                     return
 
-                market_provider = YFinanceProvider()
+                market_provider = get_market_data_provider(self.config_engine)
                 unit_engine = UnitCalculationEngine(price_buffer_pct=Decimal('2.0'))
 
                 base_allocation = self.config_engine.base_allocation.allocations
@@ -553,6 +567,51 @@ class ETFScheduler:
             logger.error(f"❌ Base plan job failed: {e}")
             import traceback
             traceback.print_exc()
+
+    async def upstox_token_reminder_job(self):
+        """Notify if Upstox token is stale before market opens."""
+        try:
+            market_data_cfg = self.config_engine.get_app_setting("market_data")
+            provider = (market_data_cfg.get("provider") or "").lower()
+            fallbacks = [p.lower() for p in market_data_cfg.get("fallback_providers", [])]
+            if provider != "upstox" and "upstox" not in fallbacks:
+                return
+
+            token_service = ApiTokenService("upstox")
+            status = await token_service.get_status()
+            if status.needs_refresh:
+                await send_telegram_message(
+                    "🔑 Upstox token needs refresh. "
+                    "Please update the access token before market opens (9:00 AM)."
+                )
+        except Exception as e:
+            logger.error(f"❌ Upstox token reminder failed: {e}")
+
+    async def annual_rebalance_job(self):
+        """Run annual FY-end rebalance during first week of April."""
+        try:
+            run_date = date.today()
+            market_provider = get_market_data_provider(self.config_engine)
+            service = AnnualRebalanceService(
+                config_engine=self.config_engine,
+                market_provider=market_provider,
+                nse_calendar=self.nse_calendar,
+            )
+            async with async_session_factory() as session:
+                result = await service.run(session=session, run_date=run_date)
+                status = result.get("status")
+                if status == "completed":
+                    logger.info(
+                        "✅ Annual rebalance completed for FY %s",
+                        result.get("fiscal_year"),
+                    )
+                else:
+                    logger.info(
+                        "ℹ️ Annual rebalance skipped (%s)",
+                        result.get("reason"),
+                    )
+        except Exception as e:
+            logger.error(f"❌ Annual rebalance job failed: {e}")
     
     def start(self):
         """Start the scheduler"""
@@ -600,6 +659,39 @@ class ETFScheduler:
             CronTrigger(hour=9, minute=5, day_of_week='mon-fri'),
             id='base_plan',
             name='Base Plan Generation',
+            replace_existing=True
+        )
+
+        # Upstox token reminder (before market hours)
+        try:
+            reminder_hour, reminder_minute = settings.UPSTOX_TOKEN_REMINDER_TIME.split(":")
+        except ValueError:
+            reminder_hour, reminder_minute = "9", "0"
+
+        self.scheduler.add_job(
+            self.upstox_token_reminder_job,
+            CronTrigger(
+                hour=int(reminder_hour),
+                minute=int(reminder_minute),
+                day_of_week='mon-fri'
+            ),
+            id='upstox_token_reminder',
+            name='Upstox Token Reminder',
+            replace_existing=True
+        )
+
+        # Annual rebalance (first week of April; runs on/after Apr 5)
+        self.scheduler.add_job(
+            self.annual_rebalance_job,
+            CronTrigger(
+                month=4,
+                day='1-7',
+                hour=9,
+                minute=30,
+                day_of_week='mon-fri',
+            ),
+            id='annual_rebalance',
+            name='Annual Rebalance',
             replace_existing=True
         )
         

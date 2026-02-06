@@ -20,7 +20,7 @@ from app.infrastructure.db.repositories.monthly_config_repository import Monthly
 from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
 from app.infrastructure.db.repositories.extra_capital_repository import ExtraCapitalRepository
 from app.utils.time import now_ist_naive
-from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
+from app.infrastructure.market_data.provider_factory import get_market_data_provider
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 from app.domain.services.market_context_engine import MarketContextEngine
 from app.domain.services.capital_engine import CapitalEngine
@@ -28,6 +28,7 @@ from app.domain.services.allocation_engine import AllocationEngine
 from app.domain.services.unit_calculation_engine import UnitCalculationEngine
 from app.domain.services.decision_engine import DecisionEngine
 from app.domain.services.config_engine import ConfigEngine
+from app.domain.models import AssetClass
 from pathlib import Path
 from app.utils.notifications import send_telegram_message
 
@@ -349,7 +350,7 @@ async def generate_decision(
             )
         
         # Initialize engines
-        market_provider = YFinanceProvider()
+        market_provider = get_market_data_provider(config_engine)
         market_context_engine = MarketContextEngine()
         
         etf_dict = {etf.symbol: etf for etf in config_engine.etf_universe.etfs}
@@ -412,7 +413,7 @@ async def generate_decision(
         etf_index_map = {
             etf.symbol: etf.underlying_index
             for etf in config_engine.etf_universe.etfs
-            if etf.underlying_index
+            if etf.underlying_index and etf.asset_class != AssetClass.GOLD
         }
         index_changes_by_etf = {}
         for symbol, index_name in etf_index_map.items():

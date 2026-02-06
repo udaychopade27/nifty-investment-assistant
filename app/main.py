@@ -13,6 +13,7 @@ import os
 import time
 from typing import AsyncGenerator
 from decimal import Decimal
+from sqlalchemy import text
 
 from app.config import settings
 from app.infrastructure.db.database import init_db, close_db
@@ -20,8 +21,9 @@ from app.domain.services.config_engine import ConfigEngine
 from app.domain.services.market_context_engine import MarketContextEngine
 from app.domain.services.allocation_engine import AllocationEngine
 from app.domain.services.unit_calculation_engine import UnitCalculationEngine
-from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
+from app.infrastructure.market_data.provider_factory import get_market_data_provider
 from app.infrastructure.calendar.nse_calendar import NSECalendar
+from app.utils.logging_redaction import install_redaction_filter
 
 # Import scheduler and telegram
 from app.scheduler.main import ETFScheduler
@@ -33,6 +35,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+install_redaction_filter()
 
 # Reduce noisy loggers in production
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
@@ -49,7 +52,7 @@ config_engine: ConfigEngine | None = None
 market_context_engine: MarketContextEngine | None = None
 allocation_engine: AllocationEngine | None = None
 unit_calculation_engine: UnitCalculationEngine | None = None
-market_data_provider: YFinanceProvider | None = None
+market_data_provider = None
 nse_calendar: NSECalendar | None = None
 
 # Service instances
@@ -92,10 +95,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     
     # 3. Initialize infrastructure
     logger.info("\n🏗️  Step 3/5: Initializing infrastructure...")
-    market_data_provider = YFinanceProvider(
-        enable_nse_fallback=True,
-        nse_primary_for_etfs=True
-    )
+    market_data_provider = get_market_data_provider(config_engine)
     nse_calendar = NSECalendar()
     logger.info("✅ Infrastructure initialized")
     
@@ -216,6 +216,44 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Comprehensive health check"""
+    # Database health (real check)
+    db_status = "disconnected"
+    db_error = None
+    try:
+        from app.infrastructure.db.database import engine
+        if engine is None:
+            db_status = "not_initialized"
+        else:
+            async with engine.begin() as conn:
+                await conn.execute(text("SELECT 1"))
+            db_status = "connected"
+    except Exception as exc:
+        db_status = "error"
+        db_error = str(exc)
+
+    # Scheduler health
+    scheduler_status = "disabled"
+    if scheduler:
+        try:
+            scheduler_running = getattr(scheduler.scheduler, "running", False)
+            scheduler_status = "running" if scheduler_running else "stopped"
+        except Exception:
+            scheduler_status = "error"
+
+    # Telegram health
+    telegram_status = "disabled"
+    if telegram_task:
+        if telegram_task.done():
+            telegram_status = "stopped"
+        else:
+            telegram_status = "running"
+    if telegram_bot and getattr(telegram_bot, "application", None):
+        try:
+            if getattr(telegram_bot.application, "running", False):
+                telegram_status = "running"
+        except Exception:
+            telegram_status = "error"
+
     return {
         "status": "healthy",
         "service": "ETF Assistant",
@@ -223,10 +261,11 @@ async def health_check():
         "strategy": config_engine.strategy_version if config_engine else "Not loaded",
         "services": {
             "api": "running",
-            "scheduler": "running" if scheduler else "disabled",
-            "telegram": "running" if telegram_task and not telegram_task.done() else "disabled",
-            "database": "connected"
+            "scheduler": scheduler_status,
+            "telegram": telegram_status,
+            "database": db_status
         },
+        "database_error": db_error,
         "capital_model": "Base + Tactical (Strict Separation)"
     }
 
@@ -246,13 +285,14 @@ async def root():
 
 
 # Import and include routers
-from app.api.routes import decision, portfolio, config as config_routes, capital, invest
+from app.api.routes import decision, portfolio, config as config_routes, capital, invest, market_data
 
 app.include_router(capital.router, prefix="/api/v1/capital", tags=["Capital"])
 app.include_router(decision.router, prefix="/api/v1/decision", tags=["Tactical Signals"])
 app.include_router(invest.router, prefix="/api/v1/invest", tags=["Base & Tactical Execution"])
 app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["Portfolio"])
 app.include_router(config_routes.router, prefix="/api/v1/config", tags=["Config"])
+app.include_router(market_data.router, prefix="/api/v1/market-data", tags=["Market Data"])
 
 
 if __name__ == "__main__":

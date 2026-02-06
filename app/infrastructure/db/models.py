@@ -246,6 +246,20 @@ class MarketDataCacheModel(Base):
     )
 
 
+class ApiTokenModel(Base):
+    """API access tokens (single latest value per provider)"""
+    __tablename__ = "api_token"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider = Column(String(50), nullable=False, unique=True, index=True)
+    token = Column(Text, nullable=False)
+    updated_by = Column(String(50), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=now_ist_naive)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
+
+    # Index already created via Column(..., index=True)
+
+
 class BaseInvestmentPlanModel(Base):
     """Persisted base investment plan per month"""
     __tablename__ = "base_investment_plan"
@@ -274,4 +288,15 @@ class CarryForwardLogModel(Base):
     tactical_carried_forward = Column(Numeric(12, 2), nullable=False)
     total_monthly_capital = Column(Numeric(12, 2), nullable=False)
 
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
+
+
+class RebalanceLogModel(Base):
+    """Annual rebalance audit log"""
+    __tablename__ = "rebalance_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fiscal_year = Column(String(9), nullable=False, unique=True, index=True)
+    rebalance_date = Column(Date, nullable=False, index=True)
+    payload = Column(JSON, nullable=False)
     created_at = Column(DateTime, nullable=False, default=now_ist_naive)

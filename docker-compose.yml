@@ -47,9 +47,13 @@ services:
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-True}
       DAILY_DECISION_TIME: ${DAILY_DECISION_TIME:-15:15}
       MONTHLY_SUMMARY_TIME: ${MONTHLY_SUMMARY_TIME:-18:00}
+      AUTO_CREATE_TABLES: ${AUTO_CREATE_TABLES:-false}
     volumes:
       - ./config:/app/config
       - ./app:/app/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+
     ports:
       - "8000:8000"
     networks:

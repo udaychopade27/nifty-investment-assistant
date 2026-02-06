@@ -18,12 +18,14 @@ from telegram.ext import (
 import httpx
 
 from app.config import settings
+from app.utils.logging_redaction import install_redaction_filter
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+install_redaction_filter()
 
 # Reduce noisy loggers in bot process
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -93,6 +95,8 @@ class ETFTelegramBot:
         self.application.add_handler(CommandHandler("allocation", self.allocation_command))
         self.application.add_handler(CommandHandler("month", self.month_command))
         self.application.add_handler(CommandHandler("tradingstatus", self.trading_status_command))
+        self.application.add_handler(CommandHandler("settoken", self.settoken_command))
+        self.application.add_handler(CommandHandler("tokenstatus", self.tokenstatus_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         
         # Add callback and message handlers
@@ -148,6 +152,8 @@ I help you invest systematically in Indian ETFs with discipline.
 /invest - Record executed trade
 /portfolio - Your holdings
 /help - All commands
+/settoken - Update Upstox token
+/tokenstatus - Check Upstox token status
 
 Let's build wealth together! 📈
     """
@@ -952,6 +958,10 @@ Use /setcapital to configure monthly capital.
 /month - Monthly summary
 /invest - Record executed trade
 
+*Market Data:*
+/settoken <token> - Update Upstox access token
+/tokenstatus - Check Upstox token status
+
 *Info Commands:*
 /etfs - ETF universe
 /rules - Investment rules
@@ -980,6 +990,61 @@ Use /setcapital to configure monthly capital.
         else:
             await update.callback_query.answer()
             await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+
+    async def settoken_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Update Upstox access token via API"""
+        try:
+            if not context.args:
+                await update.message.reply_text(
+                    "❗ Usage: /settoken <upstox_access_token>",
+                    parse_mode='Markdown'
+                )
+                return
+            token = " ".join(context.args).strip()
+            result = await self.api_post(
+                "/api/v1/market-data/upstox/token",
+                {"token": token, "source": "telegram"}
+            )
+            last_updated = result.get("last_updated") or "unknown"
+            needs_refresh = result.get("needs_refresh")
+            await update.message.reply_text(
+                "✅ *Upstox token updated*\n"
+                f"Last updated: `{last_updated}`\n"
+                f"Needs refresh: `{needs_refresh}`",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Failed to update token: {e}",
+                parse_mode='Markdown'
+            )
+
+    async def tokenstatus_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Check current Upstox token status"""
+        try:
+            status = await self.api_get("/api/v1/market-data/status")
+            upstox = status.get("upstox") or {}
+            if not upstox:
+                await update.message.reply_text(
+                    "ℹ️ Upstox token status unavailable.",
+                    parse_mode='Markdown'
+                )
+                return
+            last_updated = upstox.get("last_updated") or "never"
+            needs_refresh = upstox.get("needs_refresh")
+            masked = upstox.get("masked_token") or "not set"
+            await update.message.reply_text(
+                "🔎 *Upstox Token Status*\n"
+                f"Token: `{masked}`\n"
+                f"Last updated: `{last_updated}`\n"
+                f"Needs refresh: `{needs_refresh}`",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Failed to fetch token status: {e}",
+                parse_mode='Markdown'
+            )
     
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle button callbacks"""
@@ -1086,6 +1151,8 @@ Use /setcapital to configure monthly capital.
         application.add_handler(CommandHandler("allocation", self.allocation_command))
         application.add_handler(CommandHandler("month", self.month_command))
         application.add_handler(CommandHandler("tradingstatus", self.trading_status_command))
+        application.add_handler(CommandHandler("settoken", self.settoken_command))
+        application.add_handler(CommandHandler("tokenstatus", self.tokenstatus_command))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CallbackQueryHandler(self.button_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_input))

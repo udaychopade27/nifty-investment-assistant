@@ -401,7 +401,7 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
     Generate BASE investment plan for the auto-detected current month.
     """
     from app.domain.services.config_engine import ConfigEngine
-    from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
+    from app.infrastructure.market_data.provider_factory import get_market_data_provider
     from app.domain.services.unit_calculation_engine import UnitCalculationEngine
     from pathlib import Path
 
@@ -429,7 +429,7 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
             "note": "Using cached base plan for this month"
         }
 
-    market_provider = YFinanceProvider()
+    market_provider = get_market_data_provider()
     current_prices = await market_provider.get_current_prices(
     list(base_allocation.keys())
     )
