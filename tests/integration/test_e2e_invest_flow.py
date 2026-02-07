@@ -77,7 +77,10 @@ async def test_e2e_tactical_investment_to_portfolio(client, db_session, monkeypa
     assert resp.status_code == 200
 
     # Portfolio should reflect live prices
-    monkeypatch.setattr(portfolio_routes, "YFinanceProvider", lambda: StubPriceProvider())
+    monkeypatch.setattr(portfolio_routes, "_get_market_provider", lambda: StubPriceProvider())
+    async def _no_realtime(*args, **kwargs):
+        return None
+    monkeypatch.setattr(portfolio_routes, "_get_realtime_prices", _no_realtime)
     summary = await client.get("/api/v1/portfolio/summary")
     assert summary.status_code == 200
     data = summary.json()

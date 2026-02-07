@@ -124,7 +124,8 @@ class DailyDecisionRepository:
             remaining_tactical_capital=model.remaining_tactical_capital,
             explanation=model.explanation,
             strategy_version=model.strategy_version,
-            created_at=model.created_at
+            created_at=model.created_at,
+            id=model.id,
         )
 
 
@@ -243,5 +244,6 @@ class ETFDecisionRepository:
             actual_amount=model.actual_amount,
             status=ETFStatus(model.status.value),
             reason=model.reason,
-            created_at=model.created_at
+            created_at=model.created_at,
+            id=model.id,
         )

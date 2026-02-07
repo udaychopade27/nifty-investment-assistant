@@ -68,6 +68,7 @@ async def app(db_session) -> FastAPI:
     config_engine = ConfigEngine(config_dir)
     config_engine.load_all()
     app_main.config_engine = config_engine
+    app.state.realtime_runtime = None
 
     return app
 

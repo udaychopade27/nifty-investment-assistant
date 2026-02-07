@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     DAILY_DECISION_TIME: str = "15:15"
     MONTHLY_SUMMARY_TIME: str = "18:00"
     AUTO_CREATE_TABLES: str = "false"
+
+    # Realtime / Streaming
+    REALTIME_ENABLED: bool = False
+    UPSTOX_WS_URL: str = ""
+    UPSTOX_FEED_URL: str = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+    REALTIME_RECONNECT_DELAY: int = 5
+    REALTIME_HEARTBEAT_SECONDS: int = 20
+    REALTIME_BAR_WINDOW: int = 240
+    REDIS_URL: str = "redis://redis:6379/0"
+    REDIS_PREFIX: str = "md:"
+    REALTIME_TICK_TTL_SECONDS: int = 120
+    REALTIME_BAR_TTL_SECONDS: int = 3600
+    REALTIME_SIGNALS_ENABLED: bool = False
+    REALTIME_VOLATILITY_THRESHOLD_PCT: float = 1.5
     
     class Config:
         env_file = ".env"

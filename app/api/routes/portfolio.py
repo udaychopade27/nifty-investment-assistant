@@ -3,7 +3,7 @@ Portfolio API Routes - COMPLETE IMPLEMENTATION
 View holdings and performance with current market values
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import List, Optional
@@ -44,7 +44,24 @@ def _get_upstox_provider() -> UpstoxProvider:
         api_secret=(settings.UPSTOX_API_SECRET or "").strip() or None,
         instrument_keys=upstox_cfg.get("instrument_keys", {}),
         cache_ttl_seconds=int(upstox_cfg.get("cache_ttl", 60)),
+        rate_limit_per_sec=int(upstox_cfg.get("rate_limit_per_sec", 5)),
+        backoff_retries=int(upstox_cfg.get("backoff_retries", 2)),
+        backoff_base_seconds=float(upstox_cfg.get("backoff_base_seconds", 0.5)),
+        breaker_failures=int(upstox_cfg.get("breaker_failures", 5)),
+        breaker_cooldown_seconds=int(upstox_cfg.get("breaker_cooldown_seconds", 60)),
     )
+
+
+async def _get_realtime_prices(request: Request, symbols: List[str]) -> Optional[dict]:
+    runtime = getattr(request.app.state, "realtime_runtime", None)
+    if not runtime:
+        return None
+    if runtime.is_enabled():
+        try:
+            return await runtime.get_realtime_prices(symbols)
+        except Exception:
+            return None
+    return None
 
 
 # Response models
@@ -100,7 +117,7 @@ class BrokerPortfolioResponse(BaseModel):
 
 
 @router.get("/holdings", response_model=List[HoldingResponse])
-async def get_holdings(db: AsyncSession = Depends(get_db)):
+async def get_holdings(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Get current portfolio holdings with live market values
     
@@ -119,7 +136,9 @@ async def get_holdings(db: AsyncSession = Depends(get_db)):
         # Fetch current prices
         market_provider = _get_market_provider()
         etf_symbols = [h['etf_symbol'] for h in holdings_data]
-        current_prices = await market_provider.get_current_prices(etf_symbols)
+        current_prices = await _get_realtime_prices(request, etf_symbols)
+        if not current_prices:
+            current_prices = await market_provider.get_current_prices(etf_symbols)
         prices_missing = [s for s in etf_symbols if s not in current_prices]
         
         holdings = []
@@ -160,7 +179,7 @@ async def get_holdings(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/summary", response_model=PortfolioSummaryResponse)
-async def get_portfolio_summary(db: AsyncSession = Depends(get_db)):
+async def get_portfolio_summary(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Get complete portfolio summary with live values
     
@@ -187,7 +206,9 @@ async def get_portfolio_summary(db: AsyncSession = Depends(get_db)):
         # Fetch current prices
         market_provider = _get_market_provider()
         etf_symbols = [h['etf_symbol'] for h in holdings_data]
-        current_prices = await market_provider.get_current_prices(etf_symbols)
+        current_prices = await _get_realtime_prices(request, etf_symbols)
+        if not current_prices:
+            current_prices = await market_provider.get_current_prices(etf_symbols)
         prices_missing = [s for s in etf_symbols if s not in current_prices]
         
         # Calculate totals
@@ -246,7 +267,7 @@ async def get_portfolio_summary(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/pnl", response_model=PortfolioPnlResponse)
-async def get_portfolio_pnl(db: AsyncSession = Depends(get_db)):
+async def get_portfolio_pnl(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Get portfolio PnL with live market values.
 
@@ -274,7 +295,9 @@ async def get_portfolio_pnl(db: AsyncSession = Depends(get_db)):
 
         market_provider = get_market_data_provider()
         etf_symbols = [h['etf_symbol'] for h in holdings_data]
-        current_prices = await market_provider.get_current_prices(etf_symbols)
+        current_prices = await _get_realtime_prices(request, etf_symbols)
+        if not current_prices:
+            current_prices = await market_provider.get_current_prices(etf_symbols)
         prices_missing = [s for s in etf_symbols if s not in current_prices]
 
         total_invested = 0.0
@@ -397,7 +420,7 @@ async def get_broker_holdings():
 
 
 @router.get("/allocation")
-async def get_current_allocation(db: AsyncSession = Depends(get_db)):
+async def get_current_allocation(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Get current allocation vs target allocation
     
@@ -417,12 +440,13 @@ async def get_current_allocation(db: AsyncSession = Depends(get_db)):
         # Fetch current prices for accurate allocation
         market_provider = get_market_data_provider()
         etf_symbols = [h['etf_symbol'] for h in holdings_data]
-        current_prices = {}
-        
-        for symbol in etf_symbols:
-            price = await market_provider.get_current_price(symbol)
-            if price:
-                current_prices[symbol] = price
+        current_prices = await _get_realtime_prices(request, etf_symbols)
+        if not current_prices:
+            current_prices = {}
+            for symbol in etf_symbols:
+                price = await market_provider.get_current_price(symbol)
+                if price:
+                    current_prices[symbol] = price
         
         # Calculate current allocation
         total_current_value = 0.0
@@ -472,7 +496,7 @@ async def get_current_allocation(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/performance")
-async def get_performance_metrics(db: AsyncSession = Depends(get_db)):
+async def get_performance_metrics(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Get performance metrics and statistics
     """
@@ -489,12 +513,15 @@ async def get_performance_metrics(db: AsyncSession = Depends(get_db)):
         # Fetch current prices
         market_provider = get_market_data_provider()
         total_invested = sum(float(h['total_invested']) for h in holdings_data)
-        
-        current_prices = {}
-        for h in holdings_data:
-            price = await market_provider.get_current_price(h['etf_symbol'])
-            if price:
-                current_prices[h['etf_symbol']] = price
+
+        etf_symbols = [h['etf_symbol'] for h in holdings_data]
+        current_prices = await _get_realtime_prices(request, etf_symbols)
+        if not current_prices:
+            current_prices = {}
+            for h in holdings_data:
+                price = await market_provider.get_current_price(h['etf_symbol'])
+                if price:
+                    current_prices[h['etf_symbol']] = price
         
         # Calculate current value
         total_current_value = 0.0

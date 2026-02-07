@@ -24,6 +24,7 @@ from app.domain.services.unit_calculation_engine import UnitCalculationEngine
 from app.infrastructure.market_data.provider_factory import get_market_data_provider
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 from app.utils.logging_redaction import install_redaction_filter
+from app.realtime.runtime import RealtimeRuntime
 
 # Import scheduler and telegram
 from app.scheduler.main import ETFScheduler
@@ -59,6 +60,7 @@ nse_calendar: NSECalendar | None = None
 scheduler: ETFScheduler | None = None
 telegram_bot: ETFTelegramBot | None = None
 telegram_task: asyncio.Task | None = None
+realtime_runtime: RealtimeRuntime | None = None
 
 
 @asynccontextmanager
@@ -71,6 +73,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     global allocation_engine, unit_calculation_engine
     global market_data_provider, nse_calendar
     global scheduler, telegram_bot, telegram_task
+    global realtime_runtime
     
     # ===================
     # STARTUP
@@ -131,6 +134,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
             logger.error(f"❌ Failed to start scheduler: {e}")
     else:
         logger.info("⏰ Scheduler disabled")
+
+    # Start realtime runtime (optional)
+    try:
+        realtime_runtime = RealtimeRuntime(config_engine)
+        await realtime_runtime.start()
+        app.state.realtime_runtime = realtime_runtime
+        logger.info("⚡ Realtime runtime initialized")
+    except Exception as e:
+        logger.error(f"❌ Failed to start realtime runtime: {e}")
     
     # Start Telegram bot (async, no threads!)
     if settings.TELEGRAM_ENABLED and settings.TELEGRAM_BOT_TOKEN:
@@ -170,6 +182,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         logger.info("⏰ Stopping scheduler...")
         scheduler.stop()
         logger.info("✅ Scheduler stopped")
+
+    if realtime_runtime:
+        logger.info("⚡ Stopping realtime runtime...")
+        await realtime_runtime.stop()
+        logger.info("✅ Realtime runtime stopped")
     
     # Stop Telegram bot
     if telegram_task and not telegram_task.done():
@@ -268,6 +285,15 @@ async def health_check():
         "database_error": db_error,
         "capital_model": "Base + Tactical (Strict Separation)"
     }
+
+
+@app.get("/health/market")
+async def market_health():
+    """Realtime market data health."""
+    runtime = getattr(app.state, "realtime_runtime", None)
+    if runtime:
+        return await runtime.get_realtime_status()
+    return {"enabled": False, "connected": False, "ts": None}
 
 
 @app.get("/")

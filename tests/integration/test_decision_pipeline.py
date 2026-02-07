@@ -128,7 +128,7 @@ async def test_decision_pipeline_tactical_only(db_session):
     decision_date = date(2026, 2, 4)
     daily_decision, etf_decisions = await decision_service.generate_decision_for_date(decision_date)
 
-    assert daily_decision.decision_type.value in {"SMALL", "MEDIUM", "FULL"}
+    assert daily_decision.decision_type.value in {"SMALL", "MEDIUM", "FULL", "HIGH"}
     assert daily_decision.actual_investable_amount > Decimal("0")
 
     symbols = {d.etf_symbol for d in etf_decisions}

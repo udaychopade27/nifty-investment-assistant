@@ -27,16 +27,29 @@ class UpstoxProvider:
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
         instrument_keys: Optional[Dict[str, str]] = None,
-        cache_ttl_seconds: int = 60
+        cache_ttl_seconds: int = 1800,
+        rate_limit_per_sec: int = 5,
+        backoff_retries: int = 2,
+        backoff_base_seconds: float = 0.5,
+        breaker_failures: int = 5,
+        breaker_cooldown_seconds: int = 60
     ):
         self.api_base_url = api_base_url.rstrip("/")
         self.api_key = (api_key or "").strip() or None
         self.api_secret = (api_secret or "").strip() or None
         self.instrument_keys = {k.upper(): v for k, v in (instrument_keys or {}).items()}
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.rate_limit_per_sec = max(1, rate_limit_per_sec)
+        self.backoff_retries = max(0, backoff_retries)
+        self.backoff_base_seconds = max(0.1, backoff_base_seconds)
+        self.breaker_failures = max(1, breaker_failures)
+        self.breaker_cooldown_seconds = max(1, breaker_cooldown_seconds)
         self._cache: Dict[str, tuple[float, object]] = {}
         self._token_cache: tuple[float, Optional[str]] = (0.0, None)
         self._token_service = ApiTokenService("upstox")
+        self._last_request_ts = 0.0
+        self._breaker_open_until = 0.0
+        self._failure_count = 0
 
     def _cache_get(self, key: str) -> Optional[object]:
         cached = self._cache.get(key)
@@ -62,6 +75,10 @@ class UpstoxProvider:
         return token
 
     async def _request_json(self, url: str, params: Optional[dict] = None) -> Optional[dict]:
+        if time.time() < self._breaker_open_until:
+            logger.debug("Upstox circuit breaker open; skipping request")
+            return None
+
         token = await self._get_access_token()
         if not token:
             logger.warning("Upstox token missing; cannot call API")
@@ -75,16 +92,43 @@ class UpstoxProvider:
             headers["Api-Key"] = self.api_key
         if self.api_secret:
             headers["Api-Secret"] = self.api_secret
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, headers=headers, params=params)
-                if response.status_code != 200:
-                    logger.debug(f"Upstox API {response.status_code}: {response.text}")
-                    return None
-                return response.json()
-        except Exception as exc:
-            logger.debug(f"Upstox API request failed: {exc}")
-            return None
+        for attempt in range(self.backoff_retries + 1):
+            await self._throttle()
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(url, headers=headers, params=params)
+                if response.status_code == 200:
+                    self._failure_count = 0
+                    return response.json()
+                if response.status_code in (429, 500, 502, 503, 504):
+                    await self._handle_failure()
+                    await asyncio.sleep(self._backoff_delay(attempt))
+                    continue
+                logger.debug(f"Upstox API {response.status_code}: {response.text}")
+                await self._handle_failure()
+                return None
+            except Exception as exc:
+                logger.debug(f"Upstox API request failed: {exc}")
+                await self._handle_failure()
+                await asyncio.sleep(self._backoff_delay(attempt))
+        return None
+
+    async def _throttle(self) -> None:
+        min_interval = 1.0 / float(self.rate_limit_per_sec)
+        now = time.time()
+        sleep_for = (self._last_request_ts + min_interval) - now
+        if sleep_for > 0:
+            await asyncio.sleep(sleep_for)
+        self._last_request_ts = time.time()
+
+    async def _handle_failure(self) -> None:
+        self._failure_count += 1
+        if self._failure_count >= self.breaker_failures:
+            self._breaker_open_until = time.time() + self.breaker_cooldown_seconds
+            self._failure_count = 0
+
+    def _backoff_delay(self, attempt: int) -> float:
+        return self.backoff_base_seconds * (2 ** attempt)
 
     def _resolve_instrument_key(self, symbol: str) -> Optional[str]:
         if not symbol:
@@ -159,6 +203,11 @@ class UpstoxProvider:
         return prices
 
     async def get_price_for_date(self, symbol: str, target_date: date) -> Optional[Decimal]:
+        cache_key = f"upstox_price:{symbol}:{target_date.isoformat()}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
         key = self._resolve_instrument_key(symbol)
         if not key:
             return None
@@ -194,13 +243,20 @@ class UpstoxProvider:
             except Exception:
                 return None
 
-        return self._quantize(target_close)
+        price = self._quantize(target_close)
+        self._cache_set(cache_key, price)
+        return price
 
     # ------------------------------------------------------------------
     # NIFTY DATA
     # ------------------------------------------------------------------
 
     async def get_nifty_data(self, target_date: date) -> Optional[Dict]:
+        cache_key = f"upstox_nifty:{target_date.isoformat()}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
         key = self._resolve_instrument_key("NIFTY50") or self._resolve_instrument_key("NIFTY 50")
         if not key:
             return None
@@ -219,7 +275,7 @@ class UpstoxProvider:
         if last_price is None:
             return None
 
-        return {
+        result = {
             "date": target_date,
             "open": None,
             "high": None,
@@ -228,6 +284,8 @@ class UpstoxProvider:
             "volume": 0,
             "previous_close": self._quantize(float(prev_close)) if prev_close is not None else None,
         }
+        self._cache_set(cache_key, result)
+        return result
 
     # ------------------------------------------------------------------
     # LAST N CLOSES
@@ -239,11 +297,16 @@ class UpstoxProvider:
         n: int,
         end_date: Optional[date] = None
     ) -> List[Decimal]:
+        end_date = end_date or date.today()
+        cache_key = f"upstox_lastn:{symbol}:{n}:{end_date.isoformat()}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
         key = self._resolve_instrument_key(symbol)
         if not key:
             return []
 
-        end_date = end_date or date.today()
         from_date = end_date - timedelta(days=max(n * 4, 10))
         url = f"{self.api_base_url}/v3/historical-candle/{key}/days/1/{end_date.isoformat()}/{from_date.isoformat()}"
         payload = await self._request_json(url)
@@ -261,6 +324,7 @@ class UpstoxProvider:
             except Exception:
                 continue
 
+        self._cache_set(cache_key, closes)
         return closes
 
     # ------------------------------------------------------------------
@@ -268,6 +332,12 @@ class UpstoxProvider:
     # ------------------------------------------------------------------
 
     async def get_india_vix(self, target_date: Optional[date] = None) -> Optional[Decimal]:
+        target_date = target_date or date.today()
+        cache_key = f"upstox_vix:{target_date.isoformat()}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
         key = self._resolve_instrument_key("INDIA_VIX")
         if not key:
             return None
@@ -284,13 +354,20 @@ class UpstoxProvider:
         last_price = data.get("last_price") or data.get("ltp")
         if last_price is None:
             return None
-        return self._quantize(float(last_price))
+        value = self._quantize(float(last_price))
+        self._cache_set(cache_key, value)
+        return value
 
     # ------------------------------------------------------------------
     # INDEX DAILY CHANGE
     # ------------------------------------------------------------------
 
     async def get_index_daily_change(self, index_name: str, target_date: date) -> Optional[Decimal]:
+        cache_key = f"upstox_idxchg:{index_name}:{target_date.isoformat()}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
         key = self._resolve_instrument_key(index_name)
         if not key:
             return None
@@ -310,7 +387,9 @@ class UpstoxProvider:
             return None
 
         change = ((float(last_price) - float(prev_close)) / float(prev_close)) * 100
-        return self._quantize(change)
+        value = self._quantize(change)
+        self._cache_set(cache_key, value)
+        return value
 
     # ------------------------------------------------------------------
     # HOLDINGS (BROKER PORTFOLIO)
@@ -320,6 +399,11 @@ class UpstoxProvider:
         """
         Fetch long-term holdings from Upstox.
         """
+        cache_key = "upstox_holdings"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
         url = f"{self.api_base_url}/v2/portfolio/long-term-holdings"
         payload = await self._request_json(url)
         if not payload or payload.get("status") != "success":
@@ -327,4 +411,5 @@ class UpstoxProvider:
         data = payload.get("data")
         if not isinstance(data, list):
             return None
+        self._cache_set(cache_key, data)
         return data

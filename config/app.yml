@@ -50,7 +50,12 @@ market_data:
   timeout: 30
   upstox:
     api_base_url: https://api.upstox.com
-    cache_ttl: 60
+    cache_ttl: 1800
+    rate_limit_per_sec: 5
+    backoff_retries: 2
+    backoff_base_seconds: 0.5
+    breaker_failures: 5
+    breaker_cooldown_seconds: 60
     instrument_keys:
       NIFTY50: NSE_INDEX|Nifty 50
       INDIA_VIX: NSE_INDEX|India VIX
@@ -118,6 +123,25 @@ cache:
     market_data: 'md:'
     decisions: 'dec:'
     portfolio: 'pf:'
+realtime:
+  # Realtime streaming is for intraday/options; not required for long-term investing.
+  # Keep disabled unless you need live ticks and sub-minute PnL.
+  enabled: false
+  bar_window: 240
+  upstox_stream:
+    ws_url: ''
+    feed_url: 'https://api.upstox.com/v3/feed/market-data-feed/authorize'
+    reconnect_delay: 5
+    heartbeat_seconds: 20
+  redis:
+    enabled: true
+    url: redis://redis:6379/0
+    prefix: 'md:'
+    tick_ttl_seconds: 120
+    bar_ttl_seconds: 3600
+  signals:
+    enabled: false
+    volatility_threshold_pct: 1.5
 monitoring:
   health_check_enabled: true
   metrics_enabled: false

@@ -46,6 +46,11 @@ def _build_provider(name: str, app_config: Dict) -> MarketDataProvider:
             api_secret=api_secret,
             instrument_keys=upstox_cfg.get("instrument_keys", {}),
             cache_ttl_seconds=int(upstox_cfg.get("cache_ttl", 60)),
+            rate_limit_per_sec=int(upstox_cfg.get("rate_limit_per_sec", 5)),
+            backoff_retries=int(upstox_cfg.get("backoff_retries", 2)),
+            backoff_base_seconds=float(upstox_cfg.get("backoff_base_seconds", 0.5)),
+            breaker_failures=int(upstox_cfg.get("breaker_failures", 5)),
+            breaker_cooldown_seconds=int(upstox_cfg.get("breaker_cooldown_seconds", 60)),
         )
     if name == "nse":
         return NSEMarketDataProvider()

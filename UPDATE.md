@@ -156,7 +156,7 @@ Bot: 🟠 Decision for 2026-01-30
 ✅ Scheduler started successfully
 
 📅 Scheduled Jobs:
-  • Daily Decision - Next run: 2026-01-31 10:00:00+05:30
+  • Daily Decision - Next run: 2026-01-31 15:15:00+05:30
   • Monthly Plan - Next run: 2026-02-01 09:00:00+05:30
   • Monthly Summary - Next run: 2026-01-31 18:00:00+05:30
 

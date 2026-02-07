@@ -672,8 +672,7 @@ class ETFScheduler:
             self.upstox_token_reminder_job,
             CronTrigger(
                 hour=int(reminder_hour),
-                minute=int(reminder_minute),
-                day_of_week='mon-fri'
+                minute=int(reminder_minute)
             ),
             id='upstox_token_reminder',
             name='Upstox Token Reminder',

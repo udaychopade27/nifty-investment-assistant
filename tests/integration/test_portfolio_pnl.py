@@ -30,7 +30,10 @@ async def test_portfolio_summary_uses_live_prices(client, db_session, monkeypatc
     db_session.add(investment)
     await db_session.commit()
 
-    monkeypatch.setattr(portfolio_routes, "YFinanceProvider", lambda: StubPriceProvider())
+    monkeypatch.setattr(portfolio_routes, "_get_market_provider", lambda: StubPriceProvider())
+    async def _no_realtime(*args, **kwargs):
+        return None
+    monkeypatch.setattr(portfolio_routes, "_get_realtime_prices", _no_realtime)
 
     resp = await client.get("/api/v1/portfolio/summary")
     assert resp.status_code == 200
