@@ -36,7 +36,7 @@ services:
       API_PORT: 8000
       DEBUG: "True"
       LOG_LEVEL: INFO
-      TIMEZONE: Asia/Kolkata
+      TZ: Asia/Kolkata
       PRICE_BUFFER_PERCENT: ${PRICE_BUFFER_PERCENT:-1.0}
       MIN_INVESTMENT_AMOUNT: ${MIN_INVESTMENT_AMOUNT:-1000.00}
       TRADING_ENABLED: ${TRADING_ENABLED:-True}
@@ -48,12 +48,15 @@ services:
       DAILY_DECISION_TIME: ${DAILY_DECISION_TIME:-15:15}
       MONTHLY_SUMMARY_TIME: ${MONTHLY_SUMMARY_TIME:-18:00}
       AUTO_CREATE_TABLES: ${AUTO_CREATE_TABLES:-false}
+      # LLM Settings (optional)
+      LLM_PROVIDER: ${LLM_PROVIDER:-none}
     volumes:
       - ./config:/app/config
       - ./app:/app/app
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
-
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     ports:
       - "8000:8000"
     networks:

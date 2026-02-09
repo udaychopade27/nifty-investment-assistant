@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from app.infrastructure.market_data.upstox_marketdata_v3 import decode_feed_response, debug_feed_summary
 try:
     import websockets  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
@@ -19,6 +20,7 @@ except Exception:  # pragma: no cover - optional dependency
 logger = logging.getLogger(__name__)
 
 TickHandler = Callable[[str, Decimal, datetime], Awaitable[None]]
+TickEventHandler = Callable[[Dict[str, Any]], Awaitable[None]]
 StatusHandler = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
@@ -29,6 +31,7 @@ class UpstoxStreamClient:
         token_provider: Callable[[], Awaitable[Optional[str]]],
         instrument_keys: List[str],
         on_tick: TickHandler,
+        on_tick_event: Optional[TickEventHandler] = None,
         on_status: Optional[StatusHandler] = None,
         reconnect_delay: int = 5,
         subscribe_payload: Optional[Dict[str, Any]] = None,
@@ -40,12 +43,16 @@ class UpstoxStreamClient:
         self._token_provider = token_provider
         self._instrument_keys = instrument_keys
         self._on_tick = on_tick
+        self._on_tick_event = on_tick_event
         self._on_status = on_status
         self._reconnect_delay = reconnect_delay
         self._subscribe_payload = subscribe_payload
         self._heartbeat_seconds = heartbeat_seconds
         self._stop_event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
+        self._message_samples = 0
+        self._binary_samples = 0
+        self._debug_samples_enabled = False
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -107,7 +114,8 @@ class UpstoxStreamClient:
             "mode": "ltp",
             "instrumentKeys": self._instrument_keys,
         }
-        await ws.send(json.dumps(payload))
+        encoded = json.dumps(payload).encode("utf-8")
+        await ws.send(encoded)
 
     async def _heartbeat(self, ws: Any) -> None:
         while not self._stop_event.is_set():
@@ -117,12 +125,51 @@ class UpstoxStreamClient:
                 return
             await asyncio.sleep(self._heartbeat_seconds)
 
-    async def _handle_message(self, message: str) -> None:
+    async def _handle_message(self, message: Any) -> None:
+        if self._debug_samples_enabled and self._message_samples < 5:
+            self._message_samples += 1
+            msg_type = "binary" if isinstance(message, (bytes, bytearray)) else type(message).__name__
+            size = len(message) if hasattr(message, "__len__") else None
+            logger.info("Upstox WS sample message: type=%s size=%s", msg_type, size)
+        if isinstance(message, (bytes, bytearray)):
+            if message[:1] in (b"{", b"["):
+                try:
+                    payload = json.loads(message.decode("utf-8"))
+                    await self._handle_json_payload(payload)
+                    return
+                except Exception:
+                    pass
+            try:
+                events = decode_feed_response(bytes(message))
+                if self._debug_samples_enabled and not events and self._binary_samples < 3:
+                    self._binary_samples += 1
+                    sample = bytes(message[:24]).hex()
+                    summary = debug_feed_summary(bytes(message))
+                    logger.warning(
+                        "Upstox protobuf decoded 0 events (size=%s head=%s summary=%s)",
+                        len(message),
+                        sample,
+                        summary,
+                    )
+                for event in events:
+                    key = event.get("instrument_key")
+                    price = event.get("ltp")
+                    ts = event.get("ts")
+                    if key is None or price is None or ts is None:
+                        continue
+                    await self._on_tick(key, price, ts)
+                    if self._on_tick_event:
+                        await self._on_tick_event(event)
+            except Exception as exc:
+                logger.warning("Upstox stream protobuf decode failed: %s", exc)
+            return
         try:
             payload = json.loads(message)
         except Exception:
             return
+        await self._handle_json_payload(payload)
 
+    async def _handle_json_payload(self, payload: Dict[str, Any]) -> None:
         data = payload.get("data")
         if isinstance(data, list):
             for item in data:
@@ -155,6 +202,15 @@ class UpstoxStreamClient:
         else:
             ts = datetime.now(tz=timezone.utc)
         await self._on_tick(key, price, ts)
+        if self._on_tick_event:
+            event = {
+                "instrument_key": key,
+                "ltp": price,
+                "ts": ts,
+                "oi": item.get("oi"),
+                "volume": item.get("vtt") or item.get("volume"),
+            }
+            await self._on_tick_event(event)
 
     async def _emit_status(self, status: Dict[str, Any]) -> None:
         if self._on_status:

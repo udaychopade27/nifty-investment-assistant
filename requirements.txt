@@ -58,6 +58,7 @@ isort>=5.13.2
 # Optional: Redis for caching
 redis>=5.0.1
 websockets>=12.0
+protobuf>=4.25.0
 
 # Optional: Monitoring
 sentry-sdk>=1.39.2

@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     REALTIME_BAR_TTL_SECONDS: int = 3600
     REALTIME_SIGNALS_ENABLED: bool = False
     REALTIME_VOLATILITY_THRESHOLD_PCT: float = 1.5
+
+    # LLM (optional)
+    LLM_PROVIDER: str = "none"  # none | local | openai
+    LLM_MODEL: str = "llama3"
+    LLM_BASE_URL: str = "http://localhost:11434"
+    OPENAI_API_KEY: str = ""
     
     class Config:
         env_file = ".env"

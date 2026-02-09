@@ -69,6 +69,19 @@ def summarize_base_plan(base_plan: dict) -> dict:
     }
 
 
+def summarize_base_execution(base_investments: list) -> dict:
+    total_invested = Decimal("0")
+    by_symbol: dict[str, Decimal] = {}
+    for inv in base_investments:
+        amount = Decimal(str(inv.total_amount))
+        total_invested += amount
+        by_symbol[inv.etf_symbol] = by_symbol.get(inv.etf_symbol, Decimal("0")) + amount
+    return {
+        "total_invested": float(total_invested),
+        "by_symbol": {k: float(v) for k, v in by_symbol.items()},
+    }
+
+
 # -------------------------------------------------------------------
 # Request / Response models
 # -------------------------------------------------------------------
@@ -371,7 +384,7 @@ async def get_capital_state_history(
     return history
 
 
-@router.get("/{month}", response_model=MonthlyCapitalResponse)
+@router.get("/month/{month}", response_model=MonthlyCapitalResponse)
 async def get_capital_for_month(
     month: str,
     db: AsyncSession = Depends(get_db)
@@ -392,6 +405,14 @@ async def get_capital_for_month(
             detail=f"No capital configuration for {month}"
         )
 
+    inv_repo = ExecutedInvestmentRepository(db)
+    base_deployed = await inv_repo.get_total_base_deployed(config.month)
+    tactical_deployed = await inv_repo.get_total_tactical_deployed(config.month)
+    total_invested = base_deployed + tactical_deployed
+    base_remaining = max(config.base_capital - base_deployed, Decimal("0"))
+    tactical_remaining = max(config.tactical_capital - tactical_deployed, Decimal("0"))
+    total_remaining = max(config.monthly_capital - total_invested, Decimal("0"))
+
     return MonthlyCapitalResponse(
         month=config.month.strftime("%Y-%m"),
         monthly_capital=float(config.monthly_capital),
@@ -404,7 +425,13 @@ async def get_capital_for_month(
         month_source="explicit",
         carry_forward_applied=bool(carry_log),
         carry_forward_base=float(carry_log.base_carried_forward) if carry_log else None,
-        carry_forward_tactical=float(carry_log.tactical_carried_forward) if carry_log else None
+        carry_forward_tactical=float(carry_log.tactical_carried_forward) if carry_log else None,
+        base_invested=float(base_deployed),
+        tactical_invested=float(tactical_deployed),
+        total_invested=float(total_invested),
+        base_remaining=float(base_remaining),
+        tactical_remaining=float(tactical_remaining),
+        total_remaining=float(total_remaining),
     )
 
 
@@ -464,15 +491,32 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
 
     base_plan_repo = BaseInvestmentPlanRepository(db)
     existing_plan = await base_plan_repo.get_for_month(month_start)
+    inv_repo = ExecutedInvestmentRepository(db)
+    month_investments = await inv_repo.get_all_for_month(month_start)
+    base_investments = [i for i in month_investments if i.capital_bucket == "base"]
+    execution_summary = summarize_base_execution(base_investments)
     if existing_plan:
         base_plan = existing_plan.plan_json.get("base_plan", {})
         totals = summarize_base_plan(base_plan)
+        base_remaining = max(Decimal(str(existing_plan.base_capital)) - Decimal(str(execution_summary["total_invested"])), Decimal("0"))
+        enriched_plan = {}
+        for symbol, details in base_plan.items():
+            if isinstance(details, dict):
+                invested = execution_summary["by_symbol"].get(symbol, 0.0)
+                d = dict(details)
+                d["invested_amount"] = float(round(invested, 2))
+                d["remaining_allocated"] = float(round(max(float(d.get("allocated_amount", 0.0)) - invested, 0.0), 2))
+                enriched_plan[symbol] = d
+            else:
+                enriched_plan[symbol] = details
         return {
             "month": config.month.strftime("%B %Y"),
             "base_capital": float(existing_plan.base_capital),
             "month_source": "auto_current",
-            "base_plan": base_plan,
+            "base_plan": enriched_plan,
             **totals,
+            "base_invested": float(round(execution_summary["total_invested"], 2)),
+            "base_remaining": float(round(base_remaining, 2)),
             "note": "Using cached base plan for this month"
         }
 
@@ -522,12 +566,15 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
         )
 
     totals = summarize_base_plan(base_plan)
+    base_remaining = max(config.base_capital - Decimal(str(execution_summary["total_invested"])), Decimal("0"))
     plan_payload = {
         "month": config.month.strftime("%B %Y"),
         "base_capital": float(config.base_capital),
         "month_source": "auto_current",
         "base_plan": base_plan,
         **totals,
+        "base_invested": float(round(execution_summary["total_invested"], 2)),
+        "base_remaining": float(round(base_remaining, 2)),
         "note": "Execute gradually across trading days"
     }
 
@@ -539,3 +586,51 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
     )
 
     return plan_payload
+
+
+@router.get("/base-ledger")
+async def get_base_ledger(month: Optional[str] = None, db: AsyncSession = Depends(get_db)):
+    """Base plan ledger: allocated vs invested vs remaining per ETF and total."""
+    month_date, source = resolve_month(month)
+    cfg_repo = MonthlyConfigRepository(db)
+    config = await cfg_repo.get_for_month(month_date)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"No capital configuration for {month_date.strftime('%Y-%m')}")
+
+    plan_repo = BaseInvestmentPlanRepository(db)
+    plan_model = await plan_repo.get_for_month(month_date)
+    base_plan = (plan_model.plan_json or {}).get("base_plan", {}) if plan_model else {}
+    totals = summarize_base_plan(base_plan)
+
+    inv_repo = ExecutedInvestmentRepository(db)
+    month_investments = await inv_repo.get_all_for_month(month_date)
+    base_investments = [i for i in month_investments if i.capital_bucket == "base"]
+    execution_summary = summarize_base_execution(base_investments)
+
+    per_etf = []
+    for symbol, details in base_plan.items():
+        if not isinstance(details, dict):
+            continue
+        allocated = float(details.get("allocated_amount", 0.0) or 0.0)
+        invested = float(execution_summary["by_symbol"].get(symbol, 0.0))
+        per_etf.append(
+            {
+                "etf_symbol": symbol,
+                "allocated": round(allocated, 2),
+                "invested": round(invested, 2),
+                "remaining": round(max(allocated - invested, 0.0), 2),
+                "allocation_pct": details.get("allocation_pct"),
+            }
+        )
+
+    total_invested = float(round(execution_summary["total_invested"], 2))
+    total_allocated = float(round(totals.get("total_allocated", 0.0), 2))
+    return {
+        "month": month_date.strftime("%Y-%m"),
+        "month_source": source,
+        "base_capital": float(config.base_capital),
+        "total_allocated": total_allocated,
+        "total_invested": total_invested,
+        "total_remaining": round(max(total_allocated - total_invested, 0.0), 2),
+        "per_etf": per_etf,
+    }

@@ -315,6 +315,8 @@ Use /setcapital or click the button below.
 *Base Capital:* ₹{plan.get('base_capital', 0):,.2f}
 *Total Allocated:* ₹{plan.get('total_allocated', 0):,.2f}
 *Total Investable:* ₹{plan.get('total_actual', 0):,.2f}
+*Invested So Far:* ₹{plan.get('base_invested', 0):,.2f}
+*Remaining to Invest:* ₹{plan.get('base_remaining', 0):,.2f}
 *Unused:* ₹{plan.get('total_unused', 0):,.2f}
 
 _Loading ETF details..._

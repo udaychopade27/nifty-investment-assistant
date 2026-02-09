@@ -63,6 +63,7 @@ class ConfigEngine:
         self._risk_constraints: RiskConstraints = None
         self._rules: Dict = None
         self._app_config: Dict = None
+        self._options_config: Dict = None
         
     def load_all(self) -> None:
         """Load all configuration files"""
@@ -70,6 +71,7 @@ class ConfigEngine:
         self._load_allocations()
         self._load_rules()
         self._load_app_config()
+        self._load_options_config()
         self._validate_all()
     
     def _load_etfs(self) -> None:
@@ -164,6 +166,15 @@ class ConfigEngine:
         
         with open(app_file, 'r') as f:
             self._app_config = yaml.safe_load(f)
+
+    def _load_options_config(self) -> None:
+        """Load options config from options/options.yml"""
+        options_file = self.config_dir / "options" / "options.yml"
+        if not options_file.exists():
+            raise FileNotFoundError(f"Options config not found: {options_file}")
+
+        with open(options_file, 'r') as f:
+            self._options_config = yaml.safe_load(f)
     
     def _validate_all(self) -> None:
         """Validate all configurations"""
@@ -236,6 +247,16 @@ class ConfigEngine:
             raise RuntimeError("Config not loaded. Call load_all() first")
         
         value = self._app_config
+        for key in keys:
+            value = value[key]
+        return value
+
+    def get_options_setting(self, *keys) -> any:
+        """Get options setting by nested keys"""
+        if self._options_config is None:
+            raise RuntimeError("Config not loaded. Call load_all() first")
+
+        value = self._options_config
         for key in keys:
             value = value[key]
         return value

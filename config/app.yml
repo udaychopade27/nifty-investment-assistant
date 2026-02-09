@@ -58,6 +58,7 @@ market_data:
     breaker_cooldown_seconds: 60
     instrument_keys:
       NIFTY50: NSE_INDEX|Nifty 50
+      BANKNIFTY: NSE_INDEX|Nifty Bank
       INDIA_VIX: NSE_INDEX|India VIX
       HDFCGOLD: NSE_EQ|INF179KC1981
       JUNIORBEES: NSE_EQ|INF732E01045
@@ -66,6 +67,7 @@ market_data:
       ICICIMOM30: NSE_EQ|INF109KC17C7
       ICICIVALUE: NSE_EQ|INF109KC11V0
       NIFTY 50: NSE_INDEX|Nifty 50
+      NIFTY BANK: NSE_INDEX|Nifty Bank
       NIFTY NEXT 50: NSE_INDEX|Nifty Next 50
       NIFTY MIDCAP 150: NSE_INDEX|NIFTY MIDCAP 150
       NIFTY VALUE 20: NSE_INDEX|Nifty50 Value 20
@@ -133,6 +135,8 @@ realtime:
     feed_url: 'https://api.upstox.com/v3/feed/market-data-feed/authorize'
     reconnect_delay: 5
     heartbeat_seconds: 20
+    market_hours_only: true
+    monitor_outside_market_hours: false
   redis:
     enabled: true
     url: redis://redis:6379/0
@@ -161,6 +165,7 @@ features:
   portfolio_rebalancing: false
   advanced_analytics: false
   export_reports: true
+  options_trading: true
 testing:
   test_mode: false
   mock_market_data: false

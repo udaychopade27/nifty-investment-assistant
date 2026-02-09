@@ -1,0 +1,100 @@
+options:
+  enabled: true
+  symbols:
+    - NIFTY
+    - BANKNIFTY
+  market_data:
+    spot_symbols:
+      - NIFTY50
+      - BANKNIFTY
+    option_symbols: []
+    option_instrument_keys: []
+    option_instruments:
+      - underlying: "NIFTY 50"
+        strike: "ATM"
+        step: 50
+        side: "CE"
+        key: null
+      - underlying: "NIFTY 50"
+        strike: "ATM"
+        step: 50
+        side: "PE"
+        key: null
+      - underlying: "NIFTY BANK"
+        strike: "ATM"
+        step: 100
+        side: "CE"
+        key: null
+      - underlying: "NIFTY BANK"
+        strike: "ATM"
+        step: 100
+        side: "PE"
+        key: null
+    subscription_mode: full
+    realtime_key_mode: combined
+  market:
+    timezone: Asia/Kolkata
+    open_time: "09:15"
+    close_time: "15:30"
+  strategy:
+    timeframe_minutes: 1
+    ema_fast: 9
+    ema_slow: 21
+    vwap_window: 20
+    volume_spike_window: 20
+    volume_spike_mult: 2.0
+    signal:
+      sl_pct: 0.006
+      target_pct: 0.012
+      min_rr: 1.5
+      min_confidence: 0.62
+      cooldown_minutes: 5
+      strike_preference: "ATM"   # ATM | ITM | OTM | AUTO
+      use_atr_sl_tp: true
+      require_atr: true
+      atr_window: 14
+      atr_mult: 1.2
+      max_sl_pct: 0.15
+      min_risk_per_unit: 1.0
+      max_risk_per_unit: 120.0
+      target_rr: 1.8
+      risk_per_trade: 1000
+      min_qty: 1
+      max_qty: 300
+      ema_slope_window: 5
+      min_ema_slope: 0.02
+      rsi_window: 14
+      macd_fast: 12
+      macd_slow: 26
+      macd_signal: 9
+      boll_window: 20
+      boll_std_mult: 2.0
+      candle_quality_min: 0.55
+      volume_confirm_mult: 1.5
+      oi_confirm_required: true
+      max_hold_minutes: 20
+      trail_enabled: true
+      trail_trigger_r: 1.0
+      trail_step_r: 1.5
+      trail_lock_pct_of_profit: 0.4
+      trail_breakeven_buffer_pct: 0.0005
+      ml:
+        enabled: true
+        model_path: "data/options_paper_model.json"
+        samples_path: "data/options_paper_samples.jsonl"
+        learning_rate: 0.04
+        min_score: 0.45
+        warmup_trades: 20
+  risk:
+    max_trades_per_day: 3
+    max_loss_per_day: 1000
+    no_trade_windows:
+      - "09:15-09:25"
+      - "15:00-15:30"
+    flat_atr_threshold: 0.2
+  paper_trading:
+    enabled: true
+    qty_per_trade: 1
+    slippage_pct: 0.0
+    mid_vol_slippage_pct: 0.1
+    high_vol_slippage_pct: 0.2

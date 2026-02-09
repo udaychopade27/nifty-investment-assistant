@@ -25,6 +25,7 @@ from app.infrastructure.market_data.provider_factory import get_market_data_prov
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 from app.utils.logging_redaction import install_redaction_filter
 from app.realtime.runtime import RealtimeRuntime
+from app.domain.options.runtime import OptionsRuntime
 
 # Import scheduler and telegram
 from app.scheduler.main import ETFScheduler
@@ -61,6 +62,7 @@ scheduler: ETFScheduler | None = None
 telegram_bot: ETFTelegramBot | None = None
 telegram_task: asyncio.Task | None = None
 realtime_runtime: RealtimeRuntime | None = None
+options_runtime: OptionsRuntime | None = None
 
 
 @asynccontextmanager
@@ -74,6 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     global market_data_provider, nse_calendar
     global scheduler, telegram_bot, telegram_task
     global realtime_runtime
+    global options_runtime
     
     # ===================
     # STARTUP
@@ -143,6 +146,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         logger.info("⚡ Realtime runtime initialized")
     except Exception as e:
         logger.error(f"❌ Failed to start realtime runtime: {e}")
+
+    # Start options runtime if enabled
+    try:
+        options_runtime = OptionsRuntime(config_engine, realtime_runtime)
+        await options_runtime.start()
+        app.state.options_runtime = options_runtime
+    except Exception as e:
+        logger.error(f"❌ Failed to start options runtime: {e}")
     
     # Start Telegram bot (async, no threads!)
     if settings.TELEGRAM_ENABLED and settings.TELEGRAM_BOT_TOKEN:
@@ -187,6 +198,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         logger.info("⚡ Stopping realtime runtime...")
         await realtime_runtime.stop()
         logger.info("✅ Realtime runtime stopped")
+
+    if options_runtime:
+        await options_runtime.stop()
     
     # Stop Telegram bot
     if telegram_task and not telegram_task.done():
@@ -312,6 +326,7 @@ async def root():
 
 # Import and include routers
 from app.api.routes import decision, portfolio, config as config_routes, capital, invest, market_data
+from app.api.routes.options import router as options_router
 
 app.include_router(capital.router, prefix="/api/v1/capital", tags=["Capital"])
 app.include_router(decision.router, prefix="/api/v1/decision", tags=["Tactical Signals"])
@@ -319,6 +334,7 @@ app.include_router(invest.router, prefix="/api/v1/invest", tags=["Base & Tactica
 app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["Portfolio"])
 app.include_router(config_routes.router, prefix="/api/v1/config", tags=["Config"])
 app.include_router(market_data.router, prefix="/api/v1/market-data", tags=["Market Data"])
+app.include_router(options_router.router, prefix="/api/v1/options", tags=["Options"])
 
 
 if __name__ == "__main__":

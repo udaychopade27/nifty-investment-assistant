@@ -2,10 +2,22 @@
 
 import logging
 import httpx
+from typing import Optional
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def format_tiered_message(tier: str, title: str, body: str) -> str:
+    tier_u = (tier or "INFO").upper()
+    if tier_u == "ACTIONABLE":
+        prefix = "ACTIONABLE"
+    elif tier_u == "BLOCKED":
+        prefix = "BLOCKED"
+    else:
+        prefix = "INFO"
+    return f"[{prefix}] {title}\n\n{body}".strip()
 
 
 async def send_telegram_message(text: str) -> bool:
@@ -28,3 +40,15 @@ async def send_telegram_message(text: str) -> bool:
     except Exception as exc:
         logger.error(f"Telegram alert failed: {exc}")
         return False
+
+
+async def send_tiered_telegram_message(
+    tier: str,
+    title: str,
+    body: str,
+    extra_text: Optional[str] = None,
+) -> bool:
+    text = format_tiered_message(tier=tier, title=title, body=body)
+    if extra_text:
+        text = f"{text}\n\n{extra_text}"
+    return await send_telegram_message(text)

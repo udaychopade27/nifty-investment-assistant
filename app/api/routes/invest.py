@@ -24,8 +24,9 @@ from app.infrastructure.db.repositories.sell_repository import ExecutedSellRepos
 from app.infrastructure.db.repositories.monthly_config_repository import (
     MonthlyConfigRepository,
 )
+from app.infrastructure.db.repositories.base_plan_repository import BaseInvestmentPlanRepository
 from app.infrastructure.db.models import ExecutedInvestmentModel
-from app.utils.notifications import send_telegram_message
+from app.utils.notifications import send_tiered_telegram_message
 from app.config import settings
 from app.utils.time import now_ist_naive
 
@@ -92,8 +93,10 @@ async def execute_base_investment(
     """
 
     if not settings.TRADING_ENABLED or not settings.TRADING_BASE_ENABLED:
-        await send_telegram_message(
-            "🚫 Base investment blocked: trading is disabled by configuration."
+        await send_tiered_telegram_message(
+            tier="BLOCKED",
+            title="Base Investment Blocked",
+            body="Trading is disabled by configuration.",
         )
         raise HTTPException(
             status_code=403,
@@ -164,6 +167,24 @@ async def execute_base_investment(
     execution_notes = request.notes or "Base investment via API"
     if settings.SIMULATION_ONLY:
         execution_notes = f"SIMULATION | {execution_notes}"
+    ref_price = None
+    plan_repo = BaseInvestmentPlanRepository(db)
+    base_plan = await plan_repo.get_for_month(month_start)
+    if base_plan:
+        details = ((base_plan.plan_json or {}).get("base_plan", {}) or {}).get(request.etf_symbol, {})
+        if isinstance(details, dict):
+            ref_price = details.get("effective_price") or details.get("ltp")
+    if ref_price:
+        try:
+            slippage_pct = (
+                (Decimal(str(request.executed_price)) - Decimal(str(ref_price)))
+                / Decimal(str(ref_price))
+                * Decimal("100")
+            )
+        except Exception:
+            slippage_pct = Decimal("0")
+    else:
+        slippage_pct = Decimal("0")
 
     investment = ExecutedInvestmentModel(
         etf_decision_id=None,
@@ -171,7 +192,7 @@ async def execute_base_investment(
         units=request.units,
         executed_price=Decimal(str(request.executed_price)),
         total_amount=total_amount,
-        slippage_pct=Decimal("0"),
+        slippage_pct=slippage_pct.quantize(Decimal("0.01")),
         capital_bucket="base",
         executed_at=now_ist_naive(),
         execution_notes=execution_notes,
@@ -214,8 +235,10 @@ async def execute_tactical_investment(
     """
 
     if not settings.TRADING_ENABLED or not settings.TRADING_TACTICAL_ENABLED:
-        await send_telegram_message(
-            "🚫 Tactical investment blocked: trading is disabled by configuration."
+        await send_tiered_telegram_message(
+            tier="BLOCKED",
+            title="Tactical Investment Blocked",
+            body="Trading is disabled by configuration.",
         )
         raise HTTPException(
             status_code=403,
@@ -302,6 +325,14 @@ async def execute_tactical_investment(
     execution_notes = request.notes or f"Tactical investment (Decision: {daily_decision.decision_type.value})"
     if settings.SIMULATION_ONLY:
         execution_notes = f"SIMULATION | {execution_notes}"
+    try:
+        slippage_pct = (
+            (Decimal(str(request.executed_price)) - Decimal(str(etf_decision.effective_price)))
+            / Decimal(str(etf_decision.effective_price))
+            * Decimal("100")
+        )
+    except Exception:
+        slippage_pct = Decimal("0")
 
     investment = ExecutedInvestmentModel(
         etf_decision_id=etf_decision.id,
@@ -309,7 +340,7 @@ async def execute_tactical_investment(
         units=request.units,
         executed_price=Decimal(str(request.executed_price)),
         total_amount=total_amount,
-        slippage_pct=Decimal("0"),
+        slippage_pct=slippage_pct.quantize(Decimal("0.01")),
         capital_bucket="tactical",
         executed_at=now_ist_naive(),
         execution_notes=execution_notes,

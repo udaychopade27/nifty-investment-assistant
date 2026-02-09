@@ -10,19 +10,41 @@ from typing import List, Optional
 from decimal import Decimal
 import logging
 from pathlib import Path
+from datetime import date, timedelta
+import math
 
 from app.infrastructure.db.database import get_db
 from app.infrastructure.db.repositories.investment_repository import ExecutedInvestmentRepository
 from app.infrastructure.db.repositories.sell_repository import ExecutedSellRepository
+from app.infrastructure.db.repositories.monthly_config_repository import MonthlyConfigRepository
 from app.infrastructure.market_data.provider_factory import get_market_data_provider
 from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
 from app.infrastructure.market_data.upstox_provider import UpstoxProvider
 from app.domain.services.config_engine import ConfigEngine
 from app.config import settings
 from app.utils.time import now_ist_naive
+from app.infrastructure.calendar.nse_calendar import NSECalendar
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _classify_etf(symbol: str) -> str:
+    s = (symbol or "").upper()
+    if "GOLD" in s:
+        return "gold"
+    if "NIFTY" in s or "BEES" in s or "MIDCAP" in s or "MOM" in s or "VALUE" in s:
+        return "equity"
+    return "other"
+
+
+def _target_allocations() -> dict:
+    config_dir = Path(__file__).resolve().parents[3] / "config"
+    config_engine = ConfigEngine(config_dir)
+    config_engine.load_all()
+    alloc = dict(config_engine.base_allocation.allocations or {})
+    total = sum(float(v or 0) for v in alloc.values()) or 1.0
+    return {k: (float(v or 0) / total) * 100.0 for k, v in alloc.items()}
 
 
 def _get_market_provider():
@@ -563,3 +585,259 @@ async def get_performance_metrics(request: Request, db: AsyncSession = Depends(g
             status_code=500,
             detail=f"Failed to fetch performance: {str(e)}"
         )
+
+
+@router.get("/drift-monitor")
+async def get_drift_monitor(request: Request, threshold_pct: float = 3.0, db: AsyncSession = Depends(get_db)):
+    """Allocation drift monitor vs target blueprint."""
+    repo = ExecutedInvestmentRepository(db)
+    holdings_data = await repo.get_holdings_summary()
+    if not holdings_data:
+        return {"status": "empty", "threshold_pct": threshold_pct, "items": []}
+
+    symbols = [h["etf_symbol"] for h in holdings_data]
+    current_prices = await _get_realtime_prices(request, symbols)
+    if not current_prices:
+        market_provider = _get_market_provider()
+        current_prices = await market_provider.get_current_prices(symbols)
+
+    total_value = 0.0
+    current_weights = {}
+    for h in holdings_data:
+        sym = h["etf_symbol"]
+        val = float(h["total_units"]) * float(current_prices.get(sym, Decimal("0")))
+        total_value += val
+        current_weights[sym] = val
+    if total_value <= 0:
+        return {"status": "no_prices", "threshold_pct": threshold_pct, "items": []}
+
+    target = _target_allocations()
+    items = []
+    for sym, value in current_weights.items():
+        current_pct = (value / total_value) * 100.0
+        target_pct = float(target.get(sym, 0.0))
+        drift = current_pct - target_pct
+        if drift > threshold_pct:
+            state = "overweight"
+        elif drift < -threshold_pct:
+            state = "underweight"
+        else:
+            state = "within_band"
+        items.append(
+            {
+                "etf_symbol": sym,
+                "target_pct": round(target_pct, 2),
+                "current_pct": round(current_pct, 2),
+                "drift_pct": round(drift, 2),
+                "status": state,
+            }
+        )
+    items.sort(key=lambda x: abs(x["drift_pct"]), reverse=True)
+    return {
+        "status": "ok",
+        "threshold_pct": threshold_pct,
+        "total_current_value": round(total_value, 2),
+        "items": items,
+    }
+
+
+@router.get("/execution-quality")
+async def get_execution_quality(limit: int = 500, db: AsyncSession = Depends(get_db)):
+    """Execution quality and slippage summary from executed investments."""
+    repo = ExecutedInvestmentRepository(db)
+    rows = await repo.get_recent(limit=limit)
+    if not rows:
+        return {"status": "empty", "count": 0}
+    total_slip = 0.0
+    by_symbol: dict[str, dict] = {}
+    for r in rows:
+        slip = float(r.slippage_pct or 0.0)
+        total_slip += slip
+        d = by_symbol.setdefault(r.etf_symbol, {"count": 0, "avg_slippage_pct": 0.0})
+        d["count"] += 1
+        d["avg_slippage_pct"] += slip
+    for d in by_symbol.values():
+        d["avg_slippage_pct"] = round(d["avg_slippage_pct"] / max(d["count"], 1), 4)
+    return {
+        "status": "ok",
+        "count": len(rows),
+        "avg_slippage_pct": round(total_slip / max(len(rows), 1), 4),
+        "by_symbol": by_symbol,
+    }
+
+
+@router.get("/sip-plan")
+async def get_cashflow_aware_sip_plan(db: AsyncSession = Depends(get_db)):
+    """Cashflow-aware remaining month SIP plan."""
+    month_repo = MonthlyConfigRepository(db)
+    cfg = await month_repo.get_current()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="No monthly capital configuration for current month")
+    inv_repo = ExecutedInvestmentRepository(db)
+    base_deployed = await inv_repo.get_total_base_deployed(cfg.month)
+    tactical_deployed = await inv_repo.get_total_tactical_deployed(cfg.month)
+
+    base_remaining = max(cfg.base_capital - base_deployed, Decimal("0"))
+    tactical_remaining = max(cfg.tactical_capital - tactical_deployed, Decimal("0"))
+
+    cal = NSECalendar()
+    today = date.today()
+    if cfg.month.month == 12:
+        next_month = date(cfg.month.year + 1, 1, 1)
+    else:
+        next_month = date(cfg.month.year, cfg.month.month + 1, 1)
+    d = today
+    remaining_days = 0
+    while d < next_month:
+        if cal.is_trading_day(d):
+            remaining_days += 1
+        d += timedelta(days=1)
+    remaining_days = max(remaining_days, 1)
+
+    return {
+        "month": cfg.month.strftime("%Y-%m"),
+        "base_remaining": float(base_remaining),
+        "tactical_remaining": float(tactical_remaining),
+        "trading_days_remaining": remaining_days,
+        "recommended_daily_base": round(float(base_remaining) / remaining_days, 2),
+        "recommended_daily_tactical": round(float(tactical_remaining) / remaining_days, 2),
+    }
+
+
+@router.get("/risk-overlays")
+async def get_risk_overlays(request: Request, db: AsyncSession = Depends(get_db)):
+    """Portfolio risk overlays: concentration, asset mix, and return dispersion proxy."""
+    repo = ExecutedInvestmentRepository(db)
+    holdings_data = await repo.get_holdings_summary()
+    if not holdings_data:
+        return {"status": "empty"}
+    symbols = [h["etf_symbol"] for h in holdings_data]
+    current_prices = await _get_realtime_prices(request, symbols)
+    if not current_prices:
+        market_provider = _get_market_provider()
+        current_prices = await market_provider.get_current_prices(symbols)
+    values = []
+    by_asset = {"equity": 0.0, "gold": 0.0, "other": 0.0}
+    return_dispersion = []
+    for h in holdings_data:
+        sym = h["etf_symbol"]
+        qty = float(h["total_units"])
+        avg = float(h["average_price"])
+        px = float(current_prices.get(sym, Decimal("0")))
+        val = qty * px
+        values.append((sym, val))
+        by_asset[_classify_etf(sym)] += val
+        if avg > 0 and px > 0:
+            return_dispersion.append((px - avg) / avg)
+    total_value = sum(v for _, v in values)
+    if total_value <= 0:
+        return {"status": "no_prices"}
+    weights = [(sym, v / total_value) for sym, v in values]
+    hhi = sum(w * w for _, w in weights)
+    max_holding = max(weights, key=lambda x: x[1])
+    asset_mix = {k: round((v / total_value) * 100.0, 2) for k, v in by_asset.items()}
+    mean_r = sum(return_dispersion) / max(len(return_dispersion), 1)
+    var_r = sum((r - mean_r) ** 2 for r in return_dispersion) / max(len(return_dispersion), 1)
+    return {
+        "status": "ok",
+        "total_value": round(total_value, 2),
+        "concentration_hhi": round(hhi, 4),
+        "largest_holding": {"symbol": max_holding[0], "weight_pct": round(max_holding[1] * 100.0, 2)},
+        "asset_mix_pct": asset_mix,
+        "cross_section_return_std_pct": round(math.sqrt(var_r) * 100.0, 2),
+    }
+
+
+@router.get("/tax-report")
+async def get_tax_report(limit: int = 5000, db: AsyncSession = Depends(get_db)):
+    """Tax-aware summary (approx): realized STCG/LTCG from executed sells."""
+    sell_repo = ExecutedSellRepository(db)
+    inv_repo = ExecutedInvestmentRepository(db)
+    sells = await sell_repo.get_recent(limit=limit)
+    buys = await inv_repo.get_recent(limit=limit)
+    if not sells:
+        return {"status": "empty", "stcg_realized": 0.0, "ltcg_realized": 0.0}
+    # Approximation: use weighted average buy date per symbol as holding-period anchor.
+    buy_stats: dict[str, dict] = {}
+    for b in buys:
+        d = buy_stats.setdefault(b.etf_symbol, {"units": 0.0, "weighted_days": 0.0})
+        units = float(b.units)
+        d["units"] += units
+        d["weighted_days"] += units * float(b.executed_at.toordinal())
+    stcg = 0.0
+    ltcg = 0.0
+    for s in sells:
+        bs = buy_stats.get(s.etf_symbol)
+        if not bs or bs["units"] <= 0:
+            stcg += float(s.realized_pnl or 0.0)
+            continue
+        avg_buy_ordinal = bs["weighted_days"] / bs["units"]
+        hold_days = int(s.sold_at.toordinal() - avg_buy_ordinal)
+        if hold_days >= 365:
+            ltcg += float(s.realized_pnl or 0.0)
+        else:
+            stcg += float(s.realized_pnl or 0.0)
+    total_realized = stcg + ltcg
+    return {
+        "status": "ok",
+        "stcg_realized": round(stcg, 2),
+        "ltcg_realized": round(ltcg, 2),
+        "total_realized": round(total_realized, 2),
+        "sell_count": len(sells),
+    }
+
+
+@router.get("/scenario-stress")
+async def get_scenario_stress(
+    request: Request,
+    equity_shock_pct: float = -5.0,
+    gold_shock_pct: float = 3.0,
+    other_shock_pct: float = -2.0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Scenario stress dashboard for quick what-if impact."""
+    repo = ExecutedInvestmentRepository(db)
+    holdings_data = await repo.get_holdings_summary()
+    if not holdings_data:
+        return {"status": "empty"}
+    symbols = [h["etf_symbol"] for h in holdings_data]
+    current_prices = await _get_realtime_prices(request, symbols)
+    if not current_prices:
+        market_provider = _get_market_provider()
+        current_prices = await market_provider.get_current_prices(symbols)
+    before = 0.0
+    after = 0.0
+    breakdown = []
+    for h in holdings_data:
+        sym = h["etf_symbol"]
+        qty = float(h["total_units"])
+        px = float(current_prices.get(sym, Decimal("0")))
+        val = qty * px
+        before += val
+        cls = _classify_etf(sym)
+        shock = equity_shock_pct if cls == "equity" else gold_shock_pct if cls == "gold" else other_shock_pct
+        stressed = val * (1.0 + (shock / 100.0))
+        after += stressed
+        breakdown.append(
+            {
+                "etf_symbol": sym,
+                "asset_class": cls,
+                "current_value": round(val, 2),
+                "shock_pct": shock,
+                "stressed_value": round(stressed, 2),
+            }
+        )
+    pnl = after - before
+    return {
+        "status": "ok",
+        "scenario": {
+            "equity_shock_pct": equity_shock_pct,
+            "gold_shock_pct": gold_shock_pct,
+            "other_shock_pct": other_shock_pct,
+        },
+        "current_value": round(before, 2),
+        "stressed_value": round(after, 2),
+        "impact_value": round(pnl, 2),
+        "impact_pct": round((pnl / before) * 100.0, 2) if before > 0 else 0.0,
+        "breakdown": breakdown,
+    }

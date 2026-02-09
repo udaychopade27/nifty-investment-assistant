@@ -258,6 +258,36 @@ class ApiTokenModel(Base):
     updated_at = Column(DateTime, nullable=False, default=now_ist_naive)
     created_at = Column(DateTime, nullable=False, default=now_ist_naive)
 
+
+class OptionsSignalModel(Base):
+    """Intraday options signals (audit)"""
+    __tablename__ = "options_signal"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False, index=True)
+    signal_ts = Column(DateTime, nullable=False, index=True)
+
+    underlying = Column(String(50), nullable=False, index=True)
+    signal = Column(String(20), nullable=False, index=True)  # BUY_CE / BUY_PE
+
+    entry = Column(Numeric(12, 2), nullable=False)
+    stop_loss = Column(Numeric(12, 2), nullable=False)
+    target = Column(Numeric(12, 2), nullable=False)
+    rr = Column(Numeric(6, 2), nullable=False)
+    estimated_profit = Column(Numeric(12, 2), nullable=False)
+    entry_source = Column(String(20), nullable=False)  # option_ltp / spot
+
+    blocked = Column(Boolean, nullable=False, default=False)
+    reason = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
+
+    __table_args__ = (
+        Index("ix_options_signal_date", "date"),
+        Index("ix_options_signal_underlying", "underlying", "signal_ts"),
+    )
+
     # Index already created via Column(..., index=True)
 
 
