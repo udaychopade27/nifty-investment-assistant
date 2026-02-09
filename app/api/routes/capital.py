@@ -52,6 +52,23 @@ def resolve_month(month_str: Optional[str]) -> Tuple[date, str]:
     return date(today.year, today.month, 1), "auto_current"
 
 
+def summarize_base_plan(base_plan: dict) -> dict:
+    total_allocated = 0.0
+    total_actual = 0.0
+    total_unused = 0.0
+    for details in base_plan.values():
+        if not isinstance(details, dict):
+            continue
+        total_allocated += float(details.get("allocated_amount", 0) or 0)
+        total_actual += float(details.get("actual_amount", 0) or 0)
+        total_unused += float(details.get("unused", 0) or 0)
+    return {
+        "total_allocated": float(round(total_allocated, 2)),
+        "total_actual": float(round(total_actual, 2)),
+        "total_unused": float(round(total_unused, 2)),
+    }
+
+
 # -------------------------------------------------------------------
 # Request / Response models
 # -------------------------------------------------------------------
@@ -80,6 +97,12 @@ class MonthlyCapitalResponse(BaseModel):
     carry_forward_applied: Optional[bool] = None
     carry_forward_base: Optional[float] = None
     carry_forward_tactical: Optional[float] = None
+    base_invested: Optional[float] = None
+    tactical_invested: Optional[float] = None
+    total_invested: Optional[float] = None
+    base_remaining: Optional[float] = None
+    tactical_remaining: Optional[float] = None
+    total_remaining: Optional[float] = None
 
 
 class CarryForwardLogResponse(BaseModel):
@@ -209,7 +232,13 @@ async def set_monthly_capital(
         month_source=month_source,
         carry_forward_applied=request.apply_carry_forward,
         carry_forward_base=float(carry_forward_base) if carry_forward_base > 0 else 0.0,
-        carry_forward_tactical=float(carry_forward_tactical) if carry_forward_tactical > 0 else 0.0
+        carry_forward_tactical=float(carry_forward_tactical) if carry_forward_tactical > 0 else 0.0,
+        base_invested=0.0,
+        tactical_invested=0.0,
+        total_invested=0.0,
+        base_remaining=float(config.base_capital),
+        tactical_remaining=float(config.tactical_capital),
+        total_remaining=float(config.monthly_capital)
     )
 
 
@@ -229,6 +258,15 @@ async def get_current_capital(db: AsyncSession = Depends(get_db)):
             detail="No capital configuration for current month"
         )
 
+    inv_repo = ExecutedInvestmentRepository(db)
+    base_deployed = await inv_repo.get_total_base_deployed(config.month)
+    tactical_deployed = await inv_repo.get_total_tactical_deployed(config.month)
+
+    base_remaining = max(config.base_capital - base_deployed, Decimal("0"))
+    tactical_remaining = max(config.tactical_capital - tactical_deployed, Decimal("0"))
+    total_invested = base_deployed + tactical_deployed
+    total_remaining = max(config.monthly_capital - total_invested, Decimal("0"))
+
     return MonthlyCapitalResponse(
         month=config.month.strftime("%Y-%m"),
         monthly_capital=float(config.monthly_capital),
@@ -241,7 +279,13 @@ async def get_current_capital(db: AsyncSession = Depends(get_db)):
         month_source="auto_current",
         carry_forward_applied=bool(carry_log),
         carry_forward_base=float(carry_log.base_carried_forward) if carry_log else None,
-        carry_forward_tactical=float(carry_log.tactical_carried_forward) if carry_log else None
+        carry_forward_tactical=float(carry_log.tactical_carried_forward) if carry_log else None,
+        base_invested=float(base_deployed),
+        tactical_invested=float(tactical_deployed),
+        total_invested=float(total_invested),
+        base_remaining=float(base_remaining),
+        tactical_remaining=float(tactical_remaining),
+        total_remaining=float(total_remaining)
     )
 
 
@@ -421,11 +465,14 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
     base_plan_repo = BaseInvestmentPlanRepository(db)
     existing_plan = await base_plan_repo.get_for_month(month_start)
     if existing_plan:
+        base_plan = existing_plan.plan_json.get("base_plan", {})
+        totals = summarize_base_plan(base_plan)
         return {
             "month": config.month.strftime("%B %Y"),
             "base_capital": float(existing_plan.base_capital),
             "month_source": "auto_current",
-            "base_plan": existing_plan.plan_json.get("base_plan", {}),
+            "base_plan": base_plan,
+            **totals,
             "note": "Using cached base plan for this month"
         }
 
@@ -474,11 +521,13 @@ async def generate_base_investment_plan(db: AsyncSession = Depends(get_db)):
             detail=f"Missing prices for: {', '.join(sorted(missing_prices))}. Try again later."
         )
 
+    totals = summarize_base_plan(base_plan)
     plan_payload = {
         "month": config.month.strftime("%B %Y"),
         "base_capital": float(config.base_capital),
         "month_source": "auto_current",
         "base_plan": base_plan,
+        **totals,
         "note": "Execute gradually across trading days"
     }
 

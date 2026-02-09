@@ -414,6 +414,22 @@ const CapitalOverview = ({ capital, onSetCapital, onViewBasePlan }) => {
               </span>
             </div>
           )}
+          {capital.total_invested !== undefined && (
+            <>
+              <div className="flex justify-between">
+                <span className="text-ink-1/70">Allocated:</span>
+                <span className="font-medium">₹{capital.monthly_capital?.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink-1/70">Invested:</span>
+                <span className="font-medium text-emerald-700">₹{capital.total_invested?.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink-1/70">Remaining:</span>
+                <span className="font-medium">₹{capital.total_remaining?.toLocaleString()}</span>
+              </div>
+            </>
+          )}
         </div>
         
         <div className="grid grid-cols-2 gap-2">
