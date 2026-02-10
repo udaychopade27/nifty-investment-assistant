@@ -21,6 +21,16 @@ class OptionsCapitalUpdateRequest(BaseModel):
         default=None,
         description="Optional YYYY-MM override (e.g. 2026-02). Defaults to current IST month.",
     )
+    mode: str | None = Field(
+        default="add",
+        description="Capital update mode: 'add' (default) adds to month capital, 'replace' overwrites.",
+    )
+
+
+class OptionsReplayRequest(BaseModel):
+    symbol: str = Field(..., description="Underlying symbol, e.g. NIFTY 50")
+    force_direction: str | None = Field(default=None, description="Optional BUY_CE or BUY_PE for directional replay")
+    indicator: dict | None = Field(default=None, description="Optional indicator payload override for dry-run replay")
 
 
 @router.get("/health")
@@ -90,6 +100,30 @@ async def options_project_check(request: Request, symbol: str | None = None):
     return runtime.get_project_check(symbol=symbol)
 
 
+@router.get("/metrics")
+async def options_metrics(request: Request):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {"enabled": False, "metrics": {}}
+    return runtime.get_metrics()
+
+
+@router.get("/audit")
+async def options_audit(request: Request, limit: int = 100):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {"enabled": False, "count": 0, "items": []}
+    return runtime.get_audit_log(limit=limit)
+
+
+@router.get("/readiness")
+async def options_readiness(request: Request):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {"enabled": False, "ready_for_live": False}
+    return runtime.get_readiness_check()
+
+
 @router.get("/walk-forward")
 async def options_walk_forward(
     request: Request,
@@ -147,6 +181,29 @@ async def options_force_signal(
     return {"symbol": symbol, **result}
 
 
+@router.post("/replay")
+async def options_replay_signal(
+    request: Request,
+    payload: OptionsReplayRequest,
+):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        raise HTTPException(status_code=400, detail="Options runtime not available")
+
+    indicator = payload.indicator
+    if indicator:
+        state = runtime.get_market_state()
+        state.indicators[f"1m:{payload.symbol}"] = indicator
+    overrides = {}
+    if payload.force_direction:
+        fd = payload.force_direction.strip().upper()
+        if fd not in ("BUY_CE", "BUY_PE"):
+            raise HTTPException(status_code=400, detail="force_direction must be BUY_CE or BUY_PE")
+        overrides["force_direction"] = fd
+    result = runtime.force_signal_debug(payload.symbol, overrides=overrides or None)
+    return {"symbol": payload.symbol, **result}
+
+
 @router.post("/capital")
 async def options_set_monthly_capital(
     request: Request,
@@ -157,7 +214,10 @@ async def options_set_monthly_capital(
         raise HTTPException(status_code=400, detail="Options runtime not available")
 
     try:
-        update = runtime.set_monthly_capital(payload.monthly_capital, month=payload.month)
+        mode = (payload.mode or "add").strip().lower()
+        if mode not in ("add", "replace"):
+            raise HTTPException(status_code=400, detail="mode must be 'add' or 'replace'")
+        update = runtime.set_monthly_capital(payload.monthly_capital, month=payload.month, mode=mode)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -169,7 +229,7 @@ async def options_set_monthly_capital(
     project_cfg = options_cfg.setdefault("project", {})
     capital_cfg = project_cfg.setdefault("capital", {})
     overrides = capital_cfg.setdefault("monthly_capital_overrides", {})
-    overrides[update["month"]] = float(payload.monthly_capital)
+    overrides[update["month"]] = float(update["monthly_capital"])
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)

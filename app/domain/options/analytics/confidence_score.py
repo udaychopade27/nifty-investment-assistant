@@ -63,6 +63,8 @@ def calculate_confidence_score(
     close = indicator.get("close")
     vwap_value = indicator.get("vwap")
     oi_change = indicator.get("oi_change")
+    oi_change_ce = indicator.get("oi_change_ce")
+    oi_change_pe = indicator.get("oi_change_pe")
     iv_change = indicator.get("iv_change")
     futures_oi_change = indicator.get("futures_oi_change")
     ts = indicator.get("ts")
@@ -76,8 +78,14 @@ def calculate_confidence_score(
         elif signal_type == "BUY_PE" and close <= vwap_value:
             parts["vwap_alignment"] = w["vwap_alignment"]
 
-    # 2) ATM OI behavior proxy
-    if oi_change is not None:
+    # 2) ATM OI behavior
+    if oi_change_ce is not None and oi_change_pe is not None:
+        if signal_type == "BUY_CE" and float(oi_change_ce) < 0 and float(oi_change_pe) > 0:
+            parts["atm_oi_behavior"] = w["atm_oi_behavior"]
+        elif signal_type == "BUY_PE" and float(oi_change_pe) < 0 and float(oi_change_ce) > 0:
+            parts["atm_oi_behavior"] = w["atm_oi_behavior"]
+    elif oi_change is not None:
+        # Backward compatibility for old snapshots where side split isn't available.
         if signal_type == "BUY_CE" and float(oi_change) > 0:
             parts["atm_oi_behavior"] = w["atm_oi_behavior"]
         elif signal_type == "BUY_PE" and float(oi_change) < 0:

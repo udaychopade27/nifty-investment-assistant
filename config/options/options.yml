@@ -100,17 +100,40 @@ options:
     slippage_pct: 0.0
     mid_vol_slippage_pct: 0.1
     high_vol_slippage_pct: 0.2
+  execution:
+    mode: paper
+    live_ordering_enabled: false
+    block_when_market_closed: true
+    idempotency_window_seconds: 300
+    max_open_positions: 2
+    max_open_notional_pct: 0.6
+    pretrade_margin_buffer_pct: 0.1
+  data_quality:
+    max_spot_tick_age_seconds: 20
+    max_option_tick_age_seconds: 20
+    max_spot_jump_pct: 2.0
+    max_spread_pct_circuit: 1.2
+    anomaly_cooldown_seconds: 120
+  operations:
+    persist_runtime_state: true
+    runtime_state_file: data/options_runtime_state.json
+  promotion_gates:
+    min_closed_trades: 50
+    min_win_rate_pct: 45.0
+    max_drawdown_pct: 20.0
   project:
     strict_requirements:
       require_futures_oi_confirmation: false
       vwap_5m_window: 20
       max_spread_pct: 0.6
+      min_option_volume: 1
       delta_min_abs: 0.4
       delta_max_abs: 0.55
       delta_reject_below_abs: 0.3
       block_intraday_on_major_event: true
     event_calendar:
       major_event_dates: []
+      major_event_windows: []
     confidence:
       min_score: 70
       intraday_window:
@@ -125,10 +148,11 @@ options:
         event_risk: 5
     capital:
       monthly_capital: 15000
+      lock_monthly_capital_after_first_set: true
       risk_per_trade_pct: 0.08
       max_risk_per_trade_pct: 0.1
       daily_max_loss_pct: 0.12
       weekly_max_loss_pct: 0.25
       max_trades_per_day: 2
       monthly_capital_overrides:
-        2026-02: 18000.0
+        2026-02: 10000.0

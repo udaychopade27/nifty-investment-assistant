@@ -168,6 +168,22 @@ class APIService {
   static setUpstoxToken(token) {
     return this.post('/api/v1/market-data/upstox/token', { token, source: 'frontend' });
   }
+
+  // Options APIs
+  static getOptionsProjectCheck() {
+    return this.get('/api/v1/options/project-check');
+  }
+
+  static getOptionsState() {
+    return this.get('/api/v1/options/state');
+  }
+
+  static setOptionsCapital(monthlyCapital, month = null) {
+    return this.post('/api/v1/options/capital', {
+      monthly_capital: monthlyCapital,
+      month
+    });
+  }
 }
 
 // Dashboard Header Component
@@ -609,6 +625,111 @@ const MarketDataTrace = ({ trace, onRefresh }) => {
             )}
           </div>
         </div>
+      </div>
+    </Card>
+  );
+};
+
+const OptionsTradingOverview = ({ projectCheck, onSetCapital }) => {
+  if (!projectCheck) {
+    return (
+      <Card className="p-6">
+        <div className="text-center py-6 text-ink-1/60">Options trading status unavailable.</div>
+      </Card>
+    );
+  }
+
+  const risk = projectCheck.risk_limits || {};
+  const riskState = risk.risk_state || {};
+  const futuresCfg = projectCheck.futures_config || {};
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-semibold text-ink-0">Options Trading</h2>
+        <Badge variant={projectCheck.enabled ? 'success' : 'warning'}>
+          {projectCheck.enabled ? 'Enabled' : 'Disabled'}
+        </Badge>
+      </div>
+
+      <div className="space-y-3 text-sm">
+        <div className="flex justify-between">
+          <span className="text-ink-1/70">Month:</span>
+          <span className="font-medium">{projectCheck.month || '-'}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-ink-1/70">Trading Capital:</span>
+          <span className="font-medium">₹{Number(projectCheck.monthly_capital || 0).toLocaleString()}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-ink-1/70">Min Score:</span>
+          <span className="font-medium">{projectCheck.project_min_score || '-'}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-ink-1/70">Max Trades/Day:</span>
+          <span className="font-medium">{risk.max_trades_per_day ?? '-'}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-ink-1/70">Daily Loss Cap:</span>
+          <span className="font-medium">₹{Number(risk.max_loss_per_day || 0).toLocaleString()}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-ink-1/70">Used Risk Today:</span>
+          <span className="font-medium">₹{Number(riskState.risk_used || 0).toLocaleString()}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-ink-1/70">Futures Gate Required:</span>
+          <Badge variant={futuresCfg.required ? 'warning' : 'success'}>
+            {futuresCfg.required ? 'Yes' : 'No (Options-only)'}
+          </Badge>
+        </div>
+      </div>
+
+      <Button variant="secondary" size="sm" className="mt-4 w-full" onClick={onSetCapital}>
+        Update Options Capital
+      </Button>
+    </Card>
+  );
+};
+
+const OptionsSignalsCard = ({ optionsState }) => {
+  if (!optionsState) {
+    return (
+      <Card className="p-6">
+        <div className="text-center py-6 text-ink-1/60">Options signals unavailable.</div>
+      </Card>
+    );
+  }
+
+  const signalsMap = optionsState.signals || {};
+  const allSignals = Object.values(signalsMap).flat().slice(-8).reverse();
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-semibold text-ink-0">Recent Options Signals</h2>
+        <Badge variant="info">{allSignals.length}</Badge>
+      </div>
+      <div className="space-y-2 text-sm max-h-72 overflow-y-auto pr-1">
+        {allSignals.length === 0 && (
+          <div className="text-ink-1/60">No signals yet.</div>
+        )}
+        {allSignals.map((row, idx) => (
+          <div key={`${row.signal_time || row.ts || idx}-${idx}`} className="bg-stone-50 rounded-lg p-3">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-ink-0">{row.symbol} {row.option_side || ''}</span>
+              <Badge variant={row.signal === 'BUY_CE' ? 'success' : 'warning'}>{row.signal}</Badge>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mt-2 text-xs text-ink-1/70">
+              <div>Entry: ₹{row.entry}</div>
+              <div>SL: ₹{row.stop_loss}</div>
+              <div>TGT: ₹{row.target}</div>
+            </div>
+            <div className="text-xs text-ink-1/60 mt-1">
+              Score: {row.confidence_project ?? row.confidence_score ?? '-'} / 100
+            </div>
+          </div>
+        ))}
       </div>
     </Card>
   );
@@ -1356,6 +1477,8 @@ const ETFDashboard = () => {
   const [basePlan, setBasePlan] = useState(null);
   const [marketDataStatus, setMarketDataStatus] = useState(null);
   const [marketDataTrace, setMarketDataTrace] = useState(null);
+  const [optionsProjectCheck, setOptionsProjectCheck] = useState(null);
+  const [optionsState, setOptionsState] = useState(null);
   const [showCapitalModal, setShowCapitalModal] = useState(false);
   const [showBasePlanModal, setShowBasePlanModal] = useState(false);
   const [showTokenModal, setShowTokenModal] = useState(false);
@@ -1375,13 +1498,15 @@ const ETFDashboard = () => {
   const loadDashboardData = async () => {
     setLoading(true);
     try {
-      const [capitalData, portfolioData, brokerData, historyData, marketStatus, marketTrace] = await Promise.all([
+      const [capitalData, portfolioData, brokerData, historyData, marketStatus, marketTrace, projectCheckData, optionsStateData] = await Promise.all([
         APIService.getCapital().catch(() => null),
         APIService.getPnl().catch(() => null),
         APIService.getBrokerHoldings().catch(() => null),
         APIService.getInvestmentHistory('all', 200).catch(() => null),
         APIService.getMarketDataStatus().catch(() => null),
-        APIService.getMarketDataTrace().catch(() => null)
+        APIService.getMarketDataTrace().catch(() => null),
+        APIService.getOptionsProjectCheck().catch(() => null),
+        APIService.getOptionsState().catch(() => null)
       ]);
       
       setCapital(capitalData);
@@ -1393,6 +1518,8 @@ const ETFDashboard = () => {
       setTradeHistory(historyData);
       setMarketDataStatus(marketStatus);
       setMarketDataTrace(marketTrace);
+      setOptionsProjectCheck(projectCheckData);
+      setOptionsState(optionsStateData);
       
       // Load decision
       try {
@@ -1406,6 +1533,20 @@ const ETFDashboard = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSetOptionsCapital = async () => {
+    const current = optionsProjectCheck?.monthly_capital ? Number(optionsProjectCheck.monthly_capital) : 15000;
+    const amountText = window.prompt('Set options monthly capital (INR):', String(current));
+    if (!amountText) return;
+    const amount = Number(amountText);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert('Enter a valid amount.');
+      return;
+    }
+    await APIService.setOptionsCapital(amount);
+    const projectCheckData = await APIService.getOptionsProjectCheck().catch(() => null);
+    setOptionsProjectCheck(projectCheckData);
   };
   
   const handleSetCapital = async (amount) => {
@@ -1569,6 +1710,7 @@ const ETFDashboard = () => {
               onPageChange={setTradePage}
               pageSize={tradePageSize}
             />
+            <CombinedPortfolioSummary appPortfolio={portfolio} brokerPortfolio={brokerPortfolio} />
             <PortfolioSummary portfolio={portfolio} />
             <BrokerHoldingsCard broker={brokerPortfolio} lastSyncedAt={brokerSyncedAt} />
           </div>
@@ -1588,7 +1730,11 @@ const ETFDashboard = () => {
               trace={marketDataTrace}
               onRefresh={refreshMarketTrace}
             />
-            <CombinedPortfolioSummary appPortfolio={portfolio} brokerPortfolio={brokerPortfolio} />
+            <OptionsTradingOverview
+              projectCheck={optionsProjectCheck}
+              onSetCapital={handleSetOptionsCapital}
+            />
+            <OptionsSignalsCard optionsState={optionsState} />
           </div>
         </div>
       </div>

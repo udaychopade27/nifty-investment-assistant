@@ -48,3 +48,20 @@ def test_confidence_score_no_fallback_when_iv_and_futures_missing():
     assert parts["futures_confirmation"] == 0
     assert parts["iv_direction"] == 0
     assert score < 70
+
+
+def test_confidence_score_uses_split_oi_behavior_for_ce():
+    score, parts = calculate_confidence_score(
+        signal_type="BUY_CE",
+        indicator={
+            "close": 22010.0,
+            "vwap": 21980.0,
+            "oi_change_ce": -1500.0,
+            "oi_change_pe": 1700.0,
+            "futures_oi_change": 5000.0,
+            "iv_change": 0.3,
+            "ts": "2026-02-10T10:30:00+05:30",
+        },
+    )
+    assert parts["atm_oi_behavior"] == 25
+    assert score >= 70

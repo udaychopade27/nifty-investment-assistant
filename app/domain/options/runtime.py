@@ -88,6 +88,29 @@ class OptionsRuntime:
         self._learner = PaperSignalLearner(enabled=False, model_path="data/options_paper_model.json")
         self._project_cfg: Dict[str, Any] = {}
         self._strict_cfg: Dict[str, Any] = {}
+        self._execution_cfg: Dict[str, Any] = {}
+        self._data_quality_cfg: Dict[str, Any] = {}
+        self._ops_cfg: Dict[str, Any] = {}
+        self._promotion_cfg: Dict[str, Any] = {}
+        self._runtime_state_file: Path = Path("data/options_runtime_state.json")
+        self._audit_log: deque = deque(maxlen=500)
+        self._metrics: Dict[str, float] = {
+            "ticks_received": 0,
+            "signals_generated": 0,
+            "signals_blocked": 0,
+            "signals_executed": 0,
+            "signals_persisted": 0,
+            "risk_blocks": 0,
+            "anomalies": 0,
+            "state_saves": 0,
+            "state_loads": 0,
+            "execution_duplicates_blocked": 0,
+            "execution_precheck_blocked": 0,
+        }
+        self._processed_signal_keys: Dict[str, str] = {}
+        self._last_option_tick_ts: Dict[str, datetime] = {}
+        self._last_spot_tick_ts: Dict[str, datetime] = {}
+        self._data_anomalies: Dict[str, deque] = {}
 
     @staticmethod
     def _current_month_key() -> str:
@@ -122,6 +145,11 @@ class OptionsRuntime:
         options_cfg = self._config_engine.get_options_setting("options")
         self._project_cfg = options_cfg.get("project", {}) or {}
         self._strict_cfg = self._project_cfg.get("strict_requirements", {}) or {}
+        self._execution_cfg = options_cfg.get("execution", {}) or {}
+        self._data_quality_cfg = options_cfg.get("data_quality", {}) or {}
+        self._ops_cfg = options_cfg.get("operations", {}) or {}
+        self._promotion_cfg = options_cfg.get("promotion_gates", {}) or {}
+        self._runtime_state_file = Path(str(self._ops_cfg.get("runtime_state_file", "data/options_runtime_state.json")))
         md_cfg = options_cfg.get("market_data", {}) or {}
         self._paper_cfg = options_cfg.get("paper_trading", {}) or {}
         market_cfg = options_cfg.get("market", {}) or {}
@@ -154,10 +182,11 @@ class OptionsRuntime:
 
         # Subscribe to ticks without touching ETF logic
         self._realtime_runtime.subscribe_ticks(self._handle_tick)
+        self._load_runtime_state()
         logger.info("Options runtime subscribed to ticks")
 
     async def stop(self) -> None:
-        # No unsubscribe yet; runtime ends with app shutdown.
+        self._save_runtime_state()
         return None
 
     async def _handle_tick(self, event):
@@ -172,10 +201,16 @@ class OptionsRuntime:
         bid = event.get("bid")
         ask = event.get("ask")
         symbol = self._key_to_symbol.get(key, key)
+        self._metrics["ticks_received"] = float(self._metrics.get("ticks_received", 0)) + 1
         if isinstance(price, Decimal):
             price_value = float(price)
         else:
             price_value = float(price) if price is not None else None
+        if isinstance(ts, datetime):
+            if key in self._option_instruments:
+                self._last_option_tick_ts[key] = ts
+            elif symbol:
+                self._last_spot_tick_ts[symbol] = ts
         if key in self._futures_by_key:
             underlying = self._futures_by_key.get(key)
             if underlying and oi is not None:
@@ -221,7 +256,9 @@ class OptionsRuntime:
                     iv_hist.append(float(iv))
                 except Exception:
                     pass
+            self._check_option_tick_quality(meta.get("underlying"), key, price_value, bid, ask, ts)
         elif symbol and price_value is not None and (not self._allowed_symbols or symbol in self._allowed_symbols):
+            self._check_spot_tick_quality(symbol, price_value, ts)
             self._market_state.spot[symbol] = price_value
             builder = self._candles.get(symbol)
             if builder is None:
@@ -278,9 +315,61 @@ class OptionsRuntime:
             self._maybe_end_of_day(ts)
         return None
 
+    def _record_audit(self, event_type: str, payload: Dict[str, Any]) -> None:
+        self._audit_log.append(
+            {
+                "ts": datetime.now(IST).isoformat(),
+                "event": event_type,
+                "payload": payload,
+            }
+        )
+
+    def _mark_data_anomaly(self, symbol: Optional[str], reason: str, details: Optional[Dict[str, Any]] = None) -> None:
+        if not symbol:
+            return
+        now = datetime.now(IST)
+        bucket = self._data_anomalies.get(symbol)
+        if bucket is None:
+            bucket = deque(maxlen=20)
+            self._data_anomalies[symbol] = bucket
+        item = {"ts": now.isoformat(), "reason": reason, "details": details or {}}
+        bucket.append(item)
+        self._metrics["anomalies"] = float(self._metrics.get("anomalies", 0)) + 1
+        self._record_audit("data_anomaly", {"symbol": symbol, **item})
+
+    def _check_spot_tick_quality(self, symbol: str, price_value: float, ts: Any) -> None:
+        if not isinstance(ts, datetime):
+            return
+        current = self._market_state.spot.get(symbol)
+        max_jump_pct = float(self._data_quality_cfg.get("max_spot_jump_pct", 2.0))
+        if current and current > 0:
+            jump_pct = abs((price_value - float(current)) / float(current)) * 100.0
+            if jump_pct > max_jump_pct:
+                self._mark_data_anomaly(symbol, "spot_jump_exceeded", {"jump_pct": round(jump_pct, 3), "max_jump_pct": max_jump_pct})
+
+    def _check_option_tick_quality(self, symbol: Optional[str], key: str, ltp: float, bid: Any, ask: Any, ts: Any) -> None:
+        if not symbol:
+            return
+        if bid is None or ask is None:
+            return
+        try:
+            bid_f = float(bid)
+            ask_f = float(ask)
+            mid = (bid_f + ask_f) / 2.0
+            if mid <= 0:
+                return
+            spread_pct = ((ask_f - bid_f) / mid) * 100.0
+        except Exception:
+            return
+        max_spread = float(self._data_quality_cfg.get("max_spread_pct_circuit", 1.2))
+        if spread_pct > max_spread:
+            self._mark_data_anomaly(symbol, "spread_circuit_breaker", {"key": key, "spread_pct": round(spread_pct, 3), "max": max_spread, "ltp": ltp, "ts": ts.isoformat() if isinstance(ts, datetime) else str(ts)})
+
     def get_status(self) -> Dict[str, Any]:
         return {
             "enabled": self._enabled,
+            "execution_mode": str(self._execution_cfg.get("mode", "paper")),
+            "market_open_now": self._is_market_open_now(),
             "realtime_enabled": bool(self._realtime_runtime and self._realtime_runtime.is_enabled()),
             "tick_subscribers": self._realtime_runtime.subscriber_count("tick") if self._realtime_runtime else 0,
             "last_tick": self._last_tick,
@@ -494,6 +583,46 @@ class OptionsRuntime:
         candidates.sort(key=lambda x: x[0])
         return float(candidates[0][1])
 
+    def _get_option_row(self, symbol: str, side: str) -> Dict[str, Any]:
+        for meta in self._option_instruments.values():
+            if meta.get("underlying") == symbol and meta.get("side") == side:
+                key = meta.get("key")
+                if key and key in self._market_state.options:
+                    return self._market_state.options.get(key) or {}
+        return {}
+
+    def _is_data_fresh(self, symbol: str, side: str) -> bool:
+        max_spot_age = int(self._data_quality_cfg.get("max_spot_tick_age_seconds", 20))
+        max_opt_age = int(self._data_quality_cfg.get("max_option_tick_age_seconds", 20))
+        now = datetime.now(IST)
+        spot_ts = self._last_spot_tick_ts.get(symbol)
+        if not isinstance(spot_ts, datetime) or (now - spot_ts.astimezone(IST)).total_seconds() > max_spot_age:
+            return False
+        row = self._get_option_row(symbol, side)
+        ts_value = row.get("ts")
+        try:
+            opt_ts = datetime.fromisoformat(str(ts_value))
+        except Exception:
+            return False
+        if (now - opt_ts.astimezone(IST)).total_seconds() > max_opt_age:
+            return False
+        return True
+
+    def _recent_anomaly(self, symbol: str, within_seconds: Optional[int] = None) -> Optional[str]:
+        bucket = self._data_anomalies.get(symbol)
+        if not bucket:
+            return None
+        max_age = int(within_seconds or self._data_quality_cfg.get("anomaly_cooldown_seconds", 120))
+        now = datetime.now(IST)
+        for item in reversed(bucket):
+            try:
+                ts = datetime.fromisoformat(str(item.get("ts")))
+                if (now - ts.astimezone(IST)).total_seconds() <= max_age:
+                    return str(item.get("reason"))
+            except Exception:
+                continue
+        return None
+
     def _collect_no_trade_reasons(
         self,
         symbol: str,
@@ -602,6 +731,8 @@ class OptionsRuntime:
         option_price = self._get_option_price(symbol, option_side)
         if option_price is None:
             failures.append("missing_option_price_for_premium")
+        if not self._is_data_fresh(symbol, option_side):
+            failures.append("stale_market_data")
 
         delta_key = "delta_ce" if signal_type == "BUY_CE" else "delta_pe"
         delta_value = indicator.get(delta_key)
@@ -618,6 +749,27 @@ class OptionsRuntime:
 
         if self._is_major_event_day() and bool(self._strict_cfg.get("block_intraday_on_major_event", True)):
             failures.append("major_event_day_block")
+        if self._is_major_event_window_now():
+            failures.append("major_event_window_block")
+        try:
+            ind_ts = datetime.fromisoformat(str(indicator.get("ts")))
+            if not self._is_market_open_for_signal(ind_ts):
+                failures.append("market_closed")
+        except Exception:
+            failures.append("market_closed")
+
+        option_row = self._get_option_row(symbol, option_side)
+        min_volume = float(self._strict_cfg.get("min_option_volume", 1))
+        try:
+            volume = float(option_row.get("volume") or 0.0)
+            if volume < min_volume:
+                failures.append("liquidity_volume_too_low")
+        except Exception:
+            failures.append("liquidity_volume_missing")
+
+        anomaly = self._recent_anomaly(symbol)
+        if anomaly:
+            failures.append(f"circuit_breaker:{anomaly}")
 
         score_cfg = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
         intraday_window = score_cfg.get("intraday_window", ["09:45", "13:30"])
@@ -815,7 +967,10 @@ class OptionsRuntime:
 
         # Risk limits
         if not self._risk_allows(risk):
+            self._metrics["risk_blocks"] = float(self._metrics.get("risk_blocks", 0)) + 1
+            self._metrics["signals_blocked"] = float(self._metrics.get("signals_blocked", 0)) + 1
             self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["risk_limits"]}
+            self._record_audit("signal_blocked", {"symbol": symbol, "signal": signal_type, "reason": "risk_limits", "ts": indicator.get("ts")})
             return {
                 "symbol": symbol,
                 "signal": signal_type,
@@ -828,7 +983,6 @@ class OptionsRuntime:
                 "blocked": True,
                 "reason": "risk_limits",
             }
-        self._record_risk(risk)
 
         qty = position_size(entry, sl, signal_cfg)
         signal = {
@@ -851,6 +1005,7 @@ class OptionsRuntime:
             "ml_score": round(ml_score, 3),
             "_ml_features": features,
         }
+        self._metrics["signals_generated"] = float(self._metrics.get("signals_generated", 0)) + 1
         self._last_signal_ts[f"{symbol}:{signal_type}"] = datetime.utcnow()
         self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": []}
         return signal
@@ -885,6 +1040,67 @@ class OptionsRuntime:
     def _record_risk(self, risk: float) -> None:
         self._risk_state["trades"] += 1
         self._risk_state["risk_used"] += risk
+        self._save_runtime_state()
+
+    def _signal_dedup_key(self, signal: Dict[str, Any]) -> str:
+        return f"{signal.get('symbol')}|{signal.get('signal')}|{signal.get('ts')}|{signal.get('entry')}"
+
+    def _is_duplicate_signal(self, signal: Dict[str, Any]) -> bool:
+        key = self._signal_dedup_key(signal)
+        value = self._processed_signal_keys.get(key)
+        if not value:
+            return False
+        try:
+            seen_ts = datetime.fromisoformat(str(value)).astimezone(IST)
+        except Exception:
+            return False
+        window = int(self._execution_cfg.get("idempotency_window_seconds", 300))
+        return (datetime.now(IST) - seen_ts).total_seconds() <= window
+
+    def _mark_signal_processed(self, signal: Dict[str, Any]) -> None:
+        key = self._signal_dedup_key(signal)
+        self._processed_signal_keys[key] = datetime.now(IST).isoformat()
+
+    def _open_notional(self) -> float:
+        total = 0.0
+        for pos in self._paper_positions.values():
+            if pos.get("status") != "open":
+                continue
+            total += float(pos.get("entry", 0.0)) * float(pos.get("qty", 0.0))
+        return total
+
+    def _execution_precheck_failures(self, signal: Dict[str, Any]) -> list[str]:
+        failures: list[str] = []
+        mode = str(self._execution_cfg.get("mode", "paper")).lower()
+        if bool(self._execution_cfg.get("block_when_market_closed", True)) and not self._is_market_open_now():
+            failures.append("market_closed")
+            return failures
+        if mode not in ("paper", "shadow_live", "live"):
+            failures.append("invalid_execution_mode")
+            return failures
+        if mode == "live" and not bool(self._execution_cfg.get("live_ordering_enabled", False)):
+            failures.append("live_execution_disabled")
+            return failures
+        if self._is_duplicate_signal(signal):
+            failures.append("duplicate_signal")
+            return failures
+        risk = abs(float(signal.get("entry", 0.0)) - float(signal.get("stop_loss", 0.0)))
+        if not self._risk_allows(risk):
+            failures.append("risk_limits")
+        max_open_positions = int(self._execution_cfg.get("max_open_positions", 2))
+        if len(self._paper_positions) >= max_open_positions:
+            failures.append("max_open_positions_reached")
+        monthly_capital = float(self._get_monthly_capital() or 0.0)
+        max_notional_pct = float(self._execution_cfg.get("max_open_notional_pct", 0.60))
+        cap_notional = monthly_capital * max_notional_pct
+        est_notional = self._open_notional() + (float(signal.get("entry", 0.0)) * float(signal.get("qty", 0.0)))
+        if cap_notional > 0 and est_notional > cap_notional:
+            failures.append("notional_exposure_limit")
+        if monthly_capital > 0:
+            margin_buffer_pct = float(self._execution_cfg.get("pretrade_margin_buffer_pct", 0.10))
+            if est_notional > (monthly_capital * (1.0 - margin_buffer_pct)):
+                failures.append("margin_buffer_breach")
+        return failures
 
     def _current_week_key(self) -> str:
         now = datetime.now(IST)
@@ -1044,6 +1260,8 @@ class OptionsRuntime:
         }
         self._paper_positions[position_id] = position
         self._paper_trades.append({"type": "open", **position})
+        self._record_audit("paper_trade_open", {"id": position_id, "symbol": signal.get("symbol"), "side": side, "entry": position.get("entry"), "qty": qty})
+        self._save_runtime_state()
         self._refresh_paper_state()
 
     def _update_paper_positions(self, key: str, price: float, ts: datetime) -> None:
@@ -1092,6 +1310,8 @@ class OptionsRuntime:
             self._learner.observe(features, won=bool(pos["realized_pnl"] > 0))
             self._append_learning_sample(features, won=bool(pos["realized_pnl"] > 0), pnl=float(pos["realized_pnl"]))
         self._paper_positions.pop(pos_id, None)
+        self._record_audit("paper_trade_close", {"id": pos_id, "reason": reason, "realized_pnl": pos.get("realized_pnl", 0.0)})
+        self._save_runtime_state()
         self._refresh_paper_state()
 
     def _append_learning_sample(self, features: Dict[str, Any], won: bool, pnl: float) -> None:
@@ -1180,6 +1400,8 @@ class OptionsRuntime:
 
     def force_signal_debug(self, symbol: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         overrides = overrides or {}
+        if bool(self._execution_cfg.get("block_when_market_closed", True)) and not self._is_market_open_now():
+            return {"signal": None, "reason": "market_closed"}
         indicator = self._market_state.indicators.get(f"1m:{symbol}")
         if not indicator:
             current = self._market_state.current_candles.get(symbol)
@@ -1234,6 +1456,50 @@ class OptionsRuntime:
             "diagnostics": self._last_no_trade_reasons,
         }
 
+    def get_metrics(self) -> Dict[str, Any]:
+        return {
+            "enabled": self._enabled,
+            "execution_mode": str(self._execution_cfg.get("mode", "paper")),
+            "metrics": dict(self._metrics),
+            "open_positions": len(self._paper_positions),
+            "audit_events": len(self._audit_log),
+        }
+
+    def get_audit_log(self, limit: int = 100) -> Dict[str, Any]:
+        safe_limit = max(1, min(1000, int(limit)))
+        items = list(self._audit_log)[-safe_limit:]
+        return {
+            "enabled": self._enabled,
+            "count": len(items),
+            "items": items,
+        }
+
+    def get_readiness_check(self) -> Dict[str, Any]:
+        perf = summarize_performance([t for t in self._paper_trades if t.get("type") == "close"])
+        closed_trades = int(perf.get("closed_trades", 0))
+        win_rate = float(perf.get("win_rate", 0.0))
+        monthly_capital = float(self._get_monthly_capital() or 0.0)
+        monthly_pnl = float(self._risk_state.get("monthly_realized_pnl", 0.0))
+        drawdown_pct = ((-monthly_pnl / monthly_capital) * 100.0) if monthly_capital > 0 and monthly_pnl < 0 else 0.0
+        min_closed = int(self._promotion_cfg.get("min_closed_trades", 50))
+        min_win_rate = float(self._promotion_cfg.get("min_win_rate_pct", 45.0))
+        max_drawdown = float(self._promotion_cfg.get("max_drawdown_pct", 20.0))
+        checks = {
+            "closed_trades": {"value": closed_trades, "min_required": min_closed, "pass": closed_trades >= min_closed},
+            "win_rate_pct": {"value": round(win_rate, 2), "min_required": min_win_rate, "pass": win_rate >= min_win_rate},
+            "drawdown_pct": {"value": round(drawdown_pct, 2), "max_allowed": max_drawdown, "pass": drawdown_pct <= max_drawdown},
+            "major_event_window_clear": {"value": not self._is_major_event_window_now(), "pass": not self._is_major_event_window_now()},
+            "data_feed_fresh": {"value": self._freshness_snapshot(), "pass": all(self._freshness_snapshot().values()) if self._freshness_snapshot() else False},
+            "market_open_now": {"value": self._is_market_open_now(), "pass": self._is_market_open_now()},
+        }
+        ready_for_live = all(v.get("pass", False) for v in checks.values())
+        return {
+            "enabled": self._enabled,
+            "execution_mode": str(self._execution_cfg.get("mode", "paper")),
+            "ready_for_live": ready_for_live,
+            "checks": checks,
+        }
+
     def get_walk_forward_summary(self, date_from: Optional[str], date_to: Optional[str]) -> Dict[str, Any]:
         trades = [t for t in self._paper_trades if t.get("type") == "close"]
         if date_from:
@@ -1274,6 +1540,10 @@ class OptionsRuntime:
         except Exception:
             return True
 
+    def _is_market_open_now(self) -> bool:
+        now = datetime.now(IST)
+        return self._is_market_open_for_signal(now)
+
     def _is_major_event_day(self) -> bool:
         events_cfg = (self._project_cfg.get("event_calendar") or {}) if isinstance(self._project_cfg, dict) else {}
         dates = events_cfg.get("major_event_dates", []) or []
@@ -1281,6 +1551,24 @@ class OptionsRuntime:
             return False
         today = datetime.now(IST).date().isoformat()
         return today in [str(d) for d in dates]
+
+    def _is_major_event_window_now(self) -> bool:
+        events_cfg = (self._project_cfg.get("event_calendar") or {}) if isinstance(self._project_cfg, dict) else {}
+        windows = events_cfg.get("major_event_windows", []) or []
+        if not isinstance(windows, list):
+            return False
+        now = datetime.now(IST)
+        for item in windows:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = datetime.fromisoformat(str(item.get("start"))).astimezone(IST)
+                end = datetime.fromisoformat(str(item.get("end"))).astimezone(IST)
+            except Exception:
+                continue
+            if start <= now <= end:
+                return True
+        return False
 
     def _build_forced_signal(
         self,
@@ -1424,6 +1712,7 @@ class OptionsRuntime:
             repo = OptionsSignalRepository(session)
             await repo.save_signal(signal_payload)
             await session.commit()
+            self._metrics["signals_persisted"] = float(self._metrics.get("signals_persisted", 0)) + 1
 
     async def _process_signal(self, symbol: str, signal: Dict[str, Any], indicator: Dict[str, Any]) -> None:
         side = "CE" if signal.get("signal") == "BUY_CE" else "PE"
@@ -1459,6 +1748,13 @@ class OptionsRuntime:
         signal["reward_per_unit"] = round(reward_unit, 2)
         signal["target2"] = round(signal.get("entry") + (signal.get("target") - signal.get("entry")) * 1.5, 2)
         signal["monthly_capital"] = self._get_monthly_capital()
+        signal["execution_mode"] = str(self._execution_cfg.get("mode", "paper"))
+        signal["execution_plan"] = {
+            "order_type": "MARKET",
+            "hard_stop_loss": signal.get("stop_loss"),
+            "hard_target": signal.get("target"),
+            "idempotency_key": self._signal_dedup_key(signal),
+        }
 
         confidence = signal.get("confidence_base")
         if confidence is None:
@@ -1470,16 +1766,31 @@ class OptionsRuntime:
         signal["confidence_project"] = signal.get("confidence_score")
         min_conf = float(self._strategy_cfg.get("signal", {}).get("min_confidence", 0.62))
         if not signal.get("forced") and confidence < min_conf:
+            self._metrics["signals_blocked"] = float(self._metrics.get("signals_blocked", 0)) + 1
+            self._record_audit("signal_blocked", {"symbol": symbol, "signal": signal.get("signal"), "reason": "confidence_post_adjustment"})
             return
 
+        precheck_failures = self._execution_precheck_failures(signal)
+        if precheck_failures:
+            if "duplicate_signal" in precheck_failures:
+                self._metrics["execution_duplicates_blocked"] = float(self._metrics.get("execution_duplicates_blocked", 0)) + 1
+            self._metrics["execution_precheck_blocked"] = float(self._metrics.get("execution_precheck_blocked", 0)) + 1
+            self._metrics["signals_blocked"] = float(self._metrics.get("signals_blocked", 0)) + 1
+            self._record_audit("signal_blocked", {"symbol": symbol, "signal": signal.get("signal"), "reason": ",".join(precheck_failures)})
+            return
+
+        self._mark_signal_processed(signal)
+        self._record_risk(abs(float(signal.get("entry", 0.0)) - float(signal.get("stop_loss", 0.0))))
         self._signal_history.setdefault(symbol, deque(maxlen=50)).append(signal)
         self._market_state.signals[f"1m:{symbol}"] = list(self._signal_history[symbol])[-5:]
 
-        if self._paper_cfg.get("enabled", False):
+        if self._paper_cfg.get("enabled", False) and str(self._execution_cfg.get("mode", "paper")).lower() in ("paper", "shadow_live"):
             self._paper_trade_open(signal, side)
             self._refresh_paper_state()
         await self._persist_signal(signal)
         await self._notify_signal(signal)
+        self._metrics["signals_executed"] = float(self._metrics.get("signals_executed", 0)) + 1
+        self._record_audit("signal_executed", {"symbol": symbol, "signal": signal.get("signal"), "entry": signal.get("entry"), "ts": signal.get("ts")})
 
     def _get_monthly_capital(self) -> float | None:
         capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
@@ -1570,20 +1881,58 @@ class OptionsRuntime:
 
         risk_cfg = self._config_engine.get_options_setting("options", "risk")
         futures_ready = self._futures_config_status()
+        summary = self._project_check_summary(checks)
         return {
             "enabled": self._enabled,
+            "execution_mode": str(self._execution_cfg.get("mode", "paper")),
+            "market_open_now": self._is_market_open_now(),
             "month": self._current_month_key(),
             "monthly_capital": self._get_monthly_capital(),
             "project_min_score": min_project_score,
             "major_event_day": self._is_major_event_day(),
+            "major_event_window_now": self._is_major_event_window_now(),
             "futures_config": futures_ready,
+            "freshness": self._freshness_snapshot(),
             "risk_limits": {
                 "max_trades_per_day": risk_cfg.get("max_trades_per_day"),
                 "max_loss_per_day": risk_cfg.get("max_loss_per_day"),
                 "drawdown_action": self._drawdown_action(),
                 "risk_state": dict(self._risk_state),
             },
+            "no_trade_reason": summary.get("no_trade_reason"),
+            "summary": summary,
+            "readiness": self.get_readiness_check(),
             "checks": checks,
+        }
+
+    def _project_check_summary(self, checks: list[Dict[str, Any]]) -> Dict[str, Any]:
+        market_open = self._is_market_open_now()
+        total = len(checks)
+        no_data = sum(1 for c in checks if c.get("status") == "NO_DATA")
+        eligible = 0
+        for c in checks:
+            ce_ok = bool((c.get("ce") or {}).get("passes_threshold"))
+            pe_ok = bool((c.get("pe") or {}).get("passes_threshold"))
+            if ce_ok or pe_ok:
+                eligible += 1
+
+        if not market_open:
+            reason = "MARKET_CLOSED"
+        elif total == 0:
+            reason = "NO_SYMBOLS"
+        elif no_data == total:
+            reason = "NO_DATA"
+        elif eligible == 0:
+            reason = "GATES_FAILED"
+        else:
+            reason = "READY"
+
+        return {
+            "no_trade_reason": reason,
+            "symbols_total": total,
+            "symbols_no_data": no_data,
+            "symbols_eligible": eligible,
+            "market_open_now": market_open,
         }
 
     def _futures_config_status(self) -> Dict[str, Any]:
@@ -1611,22 +1960,75 @@ class OptionsRuntime:
             "premium_live": "missing_option_price_for_premium" not in failed,
             "delta_filter": "missing_option_delta" not in failed and "delta_below_min" not in failed and "delta_above_max" not in failed and "delta_rejected_below_floor" not in failed,
             "time_window": "outside_intraday_window" not in failed,
-            "event_day": "major_event_day_block" not in failed,
+            "event_day": "major_event_day_block" not in failed and "major_event_window_block" not in failed,
+            "data_freshness": "stale_market_data" not in failed,
+            "circuit_breaker": all(not x.startswith("circuit_breaker:") for x in failed),
+            "liquidity_volume": "liquidity_volume_too_low" not in failed and "liquidity_volume_missing" not in failed,
+            "market_open": "market_closed" not in failed,
         }
 
-    def set_monthly_capital(self, amount: float, month: Optional[str] = None) -> Dict[str, Any]:
+    def set_monthly_capital(self, amount: float, month: Optional[str] = None, mode: str = "add") -> Dict[str, Any]:
         if amount <= 0:
             raise ValueError("monthly_capital must be > 0")
         target_month = month or self._current_month_key()
         capital_cfg = self._project_cfg.setdefault("capital", {})
         overrides = capital_cfg.setdefault("monthly_capital_overrides", {})
-        overrides[target_month] = float(amount)
+        lock_after_first_set = bool(capital_cfg.get("lock_monthly_capital_after_first_set", True))
+        month_override = self._get_month_override_value(target_month)
+        month_already_set = month_override is not None
+        existing = month_override if month_already_set else self._get_monthly_capital_for_month(target_month)
+        if mode == "replace":
+            if lock_after_first_set and month_already_set:
+                raise ValueError(
+                    f"monthly_capital for {target_month} is locked after first set; use mode='add'"
+                )
+            overrides[target_month] = float(amount)
+        else:
+            # For add mode, first set of month initializes from 0, subsequent calls top up.
+            base = float(month_override) if month_override is not None else 0.0
+            overrides[target_month] = round(base + float(amount), 2)
         self._apply_project_capital_rules()
+        self._record_audit(
+            "capital_update",
+            {
+                "month": target_month,
+                "mode": mode,
+                "previous_monthly_capital": existing,
+                "new_monthly_capital": self._get_monthly_capital_for_month(target_month),
+            },
+        )
+        self._save_runtime_state()
         return {
             "month": target_month,
-            "monthly_capital": self._get_monthly_capital(),
+            "monthly_capital": self._get_monthly_capital_for_month(target_month),
+            "previous_monthly_capital": existing,
+            "mode": mode,
+            "locked_after_first_set": lock_after_first_set,
             "applied": True,
         }
+
+    def _get_month_override_value(self, month: str) -> float | None:
+        capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
+        overrides = capital_cfg.get("monthly_capital_overrides") or {}
+        if isinstance(overrides, dict) and month in overrides:
+            try:
+                return float(overrides[month])
+            except Exception:
+                return None
+        return None
+
+    def _get_monthly_capital_for_month(self, month: str) -> float | None:
+        month_override = self._get_month_override_value(month)
+        if month_override is not None:
+            return month_override
+        capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
+        value = capital_cfg.get("monthly_capital")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
 
     def _apply_project_capital_rules(self) -> None:
         capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
@@ -1648,3 +2050,68 @@ class OptionsRuntime:
 
         max_trades_per_day = int(capital_cfg.get("max_trades_per_day", risk_cfg.get("max_trades_per_day", 2)))
         risk_cfg["max_trades_per_day"] = max_trades_per_day
+
+    def _freshness_snapshot(self) -> Dict[str, bool]:
+        snapshot: Dict[str, bool] = {}
+        for symbol in sorted(self._allowed_symbols):
+            ce_ok = self._is_data_fresh(symbol, "CE")
+            pe_ok = self._is_data_fresh(symbol, "PE")
+            snapshot[symbol] = ce_ok and pe_ok
+        return snapshot
+
+    def _save_runtime_state(self) -> None:
+        if not bool(self._ops_cfg.get("persist_runtime_state", True)):
+            return
+        try:
+            payload = {
+                "risk_state": dict(self._risk_state),
+                "paper_trades": list(self._paper_trades),
+                "paper_positions": dict(self._paper_positions),
+                "last_signal_ts": {k: v.isoformat() for k, v in self._last_signal_ts.items()},
+                "processed_signal_keys": dict(self._processed_signal_keys),
+                "metrics": dict(self._metrics),
+            }
+            self._runtime_state_file.parent.mkdir(parents=True, exist_ok=True)
+            self._runtime_state_file.write_text(json.dumps(payload), encoding="utf-8")
+            self._metrics["state_saves"] = float(self._metrics.get("state_saves", 0)) + 1
+        except Exception as exc:
+            logger.warning("options runtime state save failed: %s", exc)
+
+    def _load_runtime_state(self) -> None:
+        if not bool(self._ops_cfg.get("persist_runtime_state", True)):
+            return
+        if not self._runtime_state_file.exists():
+            return
+        try:
+            payload = json.loads(self._runtime_state_file.read_text(encoding="utf-8"))
+            if isinstance(payload.get("risk_state"), dict):
+                self._risk_state.update(payload.get("risk_state") or {})
+            trades = payload.get("paper_trades") or []
+            if isinstance(trades, list):
+                self._paper_trades = deque(trades, maxlen=200)
+            positions = payload.get("paper_positions") or {}
+            if isinstance(positions, dict):
+                self._paper_positions = dict(positions)
+            last_signal_ts = payload.get("last_signal_ts") or {}
+            if isinstance(last_signal_ts, dict):
+                parsed = {}
+                for k, v in last_signal_ts.items():
+                    try:
+                        parsed[k] = datetime.fromisoformat(str(v))
+                    except Exception:
+                        continue
+                self._last_signal_ts = parsed
+            processed_keys = payload.get("processed_signal_keys") or {}
+            if isinstance(processed_keys, dict):
+                self._processed_signal_keys = dict(processed_keys)
+            metrics = payload.get("metrics") or {}
+            if isinstance(metrics, dict):
+                for k, v in metrics.items():
+                    try:
+                        self._metrics[k] = float(v)
+                    except Exception:
+                        continue
+            self._metrics["state_loads"] = float(self._metrics.get("state_loads", 0)) + 1
+            self._refresh_paper_state()
+        except Exception as exc:
+            logger.warning("options runtime state load failed: %s", exc)
