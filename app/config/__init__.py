@@ -52,6 +52,7 @@ class Settings(BaseSettings):
 
     # Realtime / Streaming
     REALTIME_ENABLED: bool = False
+    OPTIONS_RUNTIME_ENABLED: bool = True
     UPSTOX_WS_URL: str = ""
     UPSTOX_FEED_URL: str = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
     REALTIME_RECONNECT_DELAY: int = 5

@@ -208,6 +208,10 @@ class UpstoxStreamClient:
                 "ltp": price,
                 "ts": ts,
                 "oi": item.get("oi"),
+                "iv": item.get("iv"),
+                "delta": item.get("delta"),
+                "bid": item.get("bidP") or item.get("bid"),
+                "ask": item.get("askP") or item.get("ask"),
                 "volume": item.get("vtt") or item.get("volume"),
             }
             await self._on_tick_event(event)

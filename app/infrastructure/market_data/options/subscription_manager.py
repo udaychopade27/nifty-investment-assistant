@@ -36,6 +36,8 @@ class OptionsSubscriptionManager:
         spot_symbols = md_cfg.get("spot_symbols", []) or []
         option_symbols = md_cfg.get("option_symbols", []) or []
         option_keys = md_cfg.get("option_instrument_keys", []) or []
+        futures_keys = md_cfg.get("futures_instrument_keys", []) or []
+        futures_instruments = md_cfg.get("futures_instruments", []) or []
         option_instruments = md_cfg.get("option_instruments", []) or []
         if option_instruments:
             option_instruments = await self.resolve_option_instruments()
@@ -47,6 +49,12 @@ class OptionsSubscriptionManager:
                 keys.append(key)
 
         keys.extend(option_keys)
+        keys.extend(futures_keys)
+        for item in futures_instruments:
+            if isinstance(item, dict):
+                key = item.get("key")
+                if key:
+                    keys.append(str(key))
         for item in option_instruments:
             if isinstance(item, dict):
                 key = item.get("key")

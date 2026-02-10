@@ -300,18 +300,41 @@ def decode_feed_response(raw: bytes) -> List[dict]:
         ltp = getattr(ltpc, "ltp", None)
         ltt = getattr(ltpc, "ltt", None)
         oi = None
+        iv = None
+        delta = None
         vtt = None
+        bid = None
+        ask = None
         try:
             if feed.HasField("fullFeed"):
                 full_feed = feed.fullFeed
                 if full_feed.HasField("marketFF"):
                     oi = getattr(full_feed.marketFF, "oi", None)
+                    iv = getattr(full_feed.marketFF, "iv", None)
                     vtt = getattr(full_feed.marketFF, "vtt", None)
+                    try:
+                        if full_feed.marketFF.HasField("optionGreeks"):
+                            delta = getattr(full_feed.marketFF.optionGreeks, "delta", None)
+                    except Exception:
+                        delta = None
+                    try:
+                        quotes = getattr(full_feed.marketFF.marketLevel, "bidAskQuote", None)
+                        if quotes:
+                            first = quotes[0]
+                            bid = getattr(first, "bidP", None)
+                            ask = getattr(first, "askP", None)
+                    except Exception:
+                        bid = None
+                        ask = None
                 elif full_feed.HasField("indexFF"):
                     oi = None
         except Exception:
             oi = None
+            iv = None
+            delta = None
             vtt = None
+            bid = None
+            ask = None
         if ltp is None:
             continue
         ts = _ts_from_ltt(ltt)
@@ -321,6 +344,10 @@ def decode_feed_response(raw: bytes) -> List[dict]:
                 "ltp": Decimal(str(ltp)),
                 "ts": ts,
                 "oi": float(oi) if oi is not None else None,
+                "iv": float(iv) if iv is not None else None,
+                "delta": float(delta) if delta is not None else None,
+                "bid": float(bid) if bid is not None else None,
+                "ask": float(ask) if ask is not None else None,
                 "volume": float(vtt) if vtt is not None else None,
             }
         )
@@ -343,7 +370,10 @@ def decode_feed_response(raw: bytes) -> List[dict]:
             continue
         ltp, ltt = _find_ltp_ltt(feed)
         oi = _find_oi(feed)
+        iv = _find_iv(feed)
+        delta = _find_delta(feed)
         vtt = _find_vtt(feed)
+        bid, ask = _find_bid_ask(feed)
         if ltp is None:
             continue
         events.append(
@@ -352,6 +382,10 @@ def decode_feed_response(raw: bytes) -> List[dict]:
                 "ltp": Decimal(str(ltp)),
                 "ts": _ts_from_ltt(ltt),
                 "oi": oi,
+                "iv": iv,
+                "delta": delta,
+                "bid": bid,
+                "ask": ask,
                 "volume": vtt,
             }
         )
@@ -430,6 +464,69 @@ def _find_vtt(payload: object) -> Optional[float]:
             for item in node:
                 stack.append(item)
     return None
+
+
+def _find_iv(payload: object) -> Optional[float]:
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if "iv" in node:
+                try:
+                    return float(node["iv"])
+                except Exception:
+                    return None
+            for value in node.values():
+                stack.append(value)
+        elif isinstance(node, list):
+            for item in node:
+                stack.append(item)
+    return None
+
+
+def _find_delta(payload: object) -> Optional[float]:
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if "delta" in node:
+                try:
+                    return float(node["delta"])
+                except Exception:
+                    return None
+            for value in node.values():
+                stack.append(value)
+        elif isinstance(node, list):
+            for item in node:
+                stack.append(item)
+    return None
+
+
+def _find_bid_ask(payload: object) -> Tuple[Optional[float], Optional[float]]:
+    bid = None
+    ask = None
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if bid is None and "bidP" in node:
+                try:
+                    bid = float(node["bidP"])
+                except Exception:
+                    bid = None
+            if ask is None and "askP" in node:
+                try:
+                    ask = float(node["askP"])
+                except Exception:
+                    ask = None
+            for value in node.values():
+                stack.append(value)
+        elif isinstance(node, list):
+            for item in node:
+                stack.append(item)
+        if bid is not None and ask is not None:
+            break
+    return bid, ask
 
 
 def debug_feed_summary(raw: bytes) -> dict:

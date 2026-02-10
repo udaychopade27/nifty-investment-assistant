@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, Any
 from collections import deque
@@ -32,6 +32,7 @@ from app.domain.options.indicators.trend_strength import ema_slope, candle_quali
 from app.domain.options.indicators.option_chain_context import pcr
 from app.domain.options.analytics.performance import summarize as summarize_performance
 from app.domain.options.analytics.ai_confidence import rule_based_confidence, llm_adjust_confidence
+from app.domain.options.analytics.confidence_score import calculate_confidence_score
 from app.domain.options.analytics.paper_learner import PaperSignalLearner, build_features
 from app.utils.notifications import send_tiered_telegram_message
 import asyncio
@@ -52,12 +53,27 @@ class OptionsRuntime:
         self._last_tick: Optional[Dict[str, Any]] = None
         self._key_to_symbol: Dict[str, str] = {}
         self._candles: Dict[str, CandleBuilder] = {}
+        self._candles_5m: Dict[str, CandleBuilder] = {}
         self._history: Dict[str, deque] = {}
+        self._history_5m: Dict[str, deque] = {}
         self._signal_history: Dict[str, deque] = {}
         self._strategy_cfg: Dict[str, Any] = {}
         self._option_instruments: Dict[str, Dict[str, Any]] = {}
-        self._risk_state: Dict[str, Any] = {"date": None, "trades": 0, "risk_used": 0.0}
+        self._futures_by_key: Dict[str, str] = {}
+        self._risk_state: Dict[str, Any] = {
+            "date": None,
+            "week": None,
+            "trades": 0,
+            "risk_used": 0.0,
+            "daily_realized_pnl": 0.0,
+            "weekly_realized_pnl": 0.0,
+            "monthly_realized_pnl": 0.0,
+            "daily_sl_hits": 0,
+            "consecutive_losses": 0,
+        }
         self._oi_history: Dict[str, deque] = {}
+        self._iv_history: Dict[str, deque] = {}
+        self._futures_oi_history: Dict[str, deque] = {}
         self._allowed_symbols: set[str] = set()
         self._last_signal_ts: Dict[str, datetime] = {}
         self._paper_trades: deque = deque(maxlen=200)
@@ -70,6 +86,12 @@ class OptionsRuntime:
         self._market_open_time: str = "09:15"
         self._calendar = NSECalendar()
         self._learner = PaperSignalLearner(enabled=False, model_path="data/options_paper_model.json")
+        self._project_cfg: Dict[str, Any] = {}
+        self._strict_cfg: Dict[str, Any] = {}
+
+    @staticmethod
+    def _current_month_key() -> str:
+        return datetime.now(IST).strftime("%Y-%m")
 
     def is_enabled(self) -> bool:
         return self._enabled
@@ -98,13 +120,17 @@ class OptionsRuntime:
             warmup_trades=int(ml_cfg.get("warmup_trades", 20)),
         )
         options_cfg = self._config_engine.get_options_setting("options")
+        self._project_cfg = options_cfg.get("project", {}) or {}
+        self._strict_cfg = self._project_cfg.get("strict_requirements", {}) or {}
         md_cfg = options_cfg.get("market_data", {}) or {}
         self._paper_cfg = options_cfg.get("paper_trading", {}) or {}
         market_cfg = options_cfg.get("market", {}) or {}
         self._market_open_time = str(market_cfg.get("open_time", "09:15"))
         self._market_close_time = str(market_cfg.get("close_time", "15:30"))
+        self._apply_project_capital_rules()
         spot_symbols = md_cfg.get("spot_symbols", []) or []
         option_instruments = md_cfg.get("option_instruments", []) or []
+        futures_instruments = md_cfg.get("futures_instruments", []) or []
         if option_instruments:
             resolved = await OptionsChainResolver(self._config_engine).resolve()
         else:
@@ -118,6 +144,13 @@ class OptionsRuntime:
             instrument_key = instrument_map.get(spot_symbol)
             if instrument_key and instrument_key in self._key_to_symbol:
                 self._allowed_symbols.add(self._key_to_symbol[instrument_key])
+        for fut in futures_instruments:
+            if not isinstance(fut, dict):
+                continue
+            key = fut.get("key")
+            underlying = fut.get("underlying")
+            if key and underlying:
+                self._futures_by_key[str(key)] = str(underlying)
 
         # Subscribe to ticks without touching ETF logic
         self._realtime_runtime.subscribe_ticks(self._handle_tick)
@@ -134,12 +167,27 @@ class OptionsRuntime:
         price = event.get("price") or event.get("ltp")
         ts = event.get("ts")
         oi = event.get("oi")
+        iv = event.get("iv")
+        delta = event.get("delta")
+        bid = event.get("bid")
+        ask = event.get("ask")
         symbol = self._key_to_symbol.get(key, key)
         if isinstance(price, Decimal):
             price_value = float(price)
         else:
             price_value = float(price) if price is not None else None
-        if key in self._option_instruments and price_value is not None:
+        if key in self._futures_by_key:
+            underlying = self._futures_by_key.get(key)
+            if underlying and oi is not None:
+                history = self._futures_oi_history.get(underlying)
+                if history is None:
+                    history = deque(maxlen=2)
+                    self._futures_oi_history[underlying] = history
+                try:
+                    history.append(float(oi))
+                except Exception:
+                    pass
+        elif key in self._option_instruments and price_value is not None:
             meta = self._option_instruments[key]
             self._market_state.options[key] = {
                 "underlying": meta.get("underlying"),
@@ -147,6 +195,10 @@ class OptionsRuntime:
                 "side": meta.get("side"),
                 "ltp": price_value,
                 "oi": oi,
+                "iv": iv,
+                "delta": delta,
+                "bid": bid,
+                "ask": ask,
                 "volume": event.get("volume"),
                 "ts": ts.isoformat() if isinstance(ts, datetime) else str(ts),
             }
@@ -160,16 +212,33 @@ class OptionsRuntime:
                     history.append(float(oi))
                 except Exception:
                     pass
+            if iv is not None:
+                iv_hist = self._iv_history.get(key)
+                if iv_hist is None:
+                    iv_hist = deque(maxlen=2)
+                    self._iv_history[key] = iv_hist
+                try:
+                    iv_hist.append(float(iv))
+                except Exception:
+                    pass
         elif symbol and price_value is not None and (not self._allowed_symbols or symbol in self._allowed_symbols):
             self._market_state.spot[symbol] = price_value
             builder = self._candles.get(symbol)
             if builder is None:
                 builder = CandleBuilder()
                 self._candles[symbol] = builder
+            builder_5m = self._candles_5m.get(symbol)
+            if builder_5m is None:
+                builder_5m = CandleBuilder(interval_seconds=300)
+                self._candles_5m[symbol] = builder_5m
             history = self._history.get(symbol)
             if history is None:
                 history = deque(maxlen=300)
                 self._history[symbol] = history
+            history_5m = self._history_5m.get(symbol)
+            if history_5m is None:
+                history_5m = deque(maxlen=300)
+                self._history_5m[symbol] = history_5m
             signal_history = self._signal_history.get(symbol)
             if signal_history is None:
                 signal_history = deque(maxlen=50)
@@ -178,7 +247,10 @@ class OptionsRuntime:
             candle = builder.update(ts, price_value, 0.0)
             if candle:
                 history.append(candle)
-                indicator = self._compute_indicators(symbol, history)
+                candle_5m = self._update_5m_candle(symbol, candle)
+                if candle_5m:
+                    history_5m.append(candle_5m)
+                indicator = self._compute_indicators(symbol, history, history_5m)
                 if indicator:
                     self._market_state.indicators[f"1m:{symbol}"] = indicator
                 signal = self._compute_signal(symbol, indicator)
@@ -217,7 +289,7 @@ class OptionsRuntime:
     def get_market_state(self) -> MarketState:
         return self._market_state
 
-    def _compute_indicators(self, symbol: str, history: deque) -> Optional[Dict[str, Any]]:
+    def _compute_indicators(self, symbol: str, history: deque, history_5m: deque) -> Optional[Dict[str, Any]]:
         closes = [c.close for c in history]
         volumes = [c.volume for c in history]
         ema_fast = ema(closes, int(self._strategy_cfg.get("ema_fast", 9)))
@@ -245,7 +317,16 @@ class OptionsRuntime:
         )
         oi_ce = self._get_oi_side(symbol, "CE")
         oi_pe = self._get_oi_side(symbol, "PE")
+        oi_ce_change = self._compute_oi_side_change(symbol, "CE")
+        oi_pe_change = self._compute_oi_side_change(symbol, "PE")
         pcr_value = pcr(oi_ce, oi_pe)
+        iv_change = self._compute_iv_change(symbol)
+        futures_oi_change = self._compute_futures_oi_change(symbol)
+        delta_ce = self._get_delta_side(symbol, "CE")
+        delta_pe = self._get_delta_side(symbol, "PE")
+        spread_ce_pct = self._get_spread_pct(symbol, "CE")
+        spread_pe_pct = self._get_spread_pct(symbol, "PE")
+        close_5m, vwap_5m, ts_5m = self._get_5m_confirmation(history_5m)
         return {
             "ts": history[-1].ts.isoformat(),
             "open": history[-1].open,
@@ -258,13 +339,41 @@ class OptionsRuntime:
             "vwap": vwap_value,
             "volume_spike": spike,
             "oi_change": self._compute_oi_change(symbol),
+            "oi_change_ce": oi_ce_change,
+            "oi_change_pe": oi_pe_change,
             "atr": atr,
             "ema_slope": slope,
             "pcr": pcr_value,
+            "iv_change": iv_change,
+            "futures_oi_change": futures_oi_change,
+            "delta_ce": delta_ce,
+            "delta_pe": delta_pe,
+            "spread_ce_pct": spread_ce_pct,
+            "spread_pe_pct": spread_pe_pct,
+            "close_5m": close_5m,
+            "vwap_5m": vwap_5m,
+            "ts_5m": ts_5m,
             "rsi": rsi_value,
             "macd_hist": macd_hist,
             "boll_pos": boll_pos,
         }
+
+    def _update_5m_candle(self, symbol: str, candle_1m) -> Optional[Any]:
+        builder = self._candles_5m.get(symbol)
+        if builder is None:
+            builder = CandleBuilder(interval_seconds=300)
+            self._candles_5m[symbol] = builder
+        return builder.update(candle_1m.ts, candle_1m.close, candle_1m.volume)
+
+    def _get_5m_confirmation(self, history_5m: deque) -> tuple[Optional[float], Optional[float], Optional[str]]:
+        if not history_5m:
+            return None, None, None
+        closes = [c.close for c in history_5m]
+        volumes = [c.volume for c in history_5m]
+        window = int(self._strict_cfg.get("vwap_5m_window", 20))
+        close_5m = history_5m[-1].close
+        vwap_5m = vwap(closes[-window:], volumes[-window:])
+        return close_5m, vwap_5m, history_5m[-1].ts.isoformat()
 
     def _compute_oi_change(self, symbol: str) -> Optional[float]:
         # Aggregate change across available option instruments for the underlying.
@@ -278,6 +387,72 @@ class OptionsRuntime:
         if not changes:
             return None
         return sum(changes)
+
+    def _compute_oi_side_change(self, symbol: str, side: str) -> Optional[float]:
+        changes = []
+        for meta in self._option_instruments.values():
+            if meta.get("underlying") == symbol and meta.get("side") == side:
+                key = meta.get("key")
+                history = self._oi_history.get(key)
+                if history and len(history) == 2:
+                    changes.append(history[-1] - history[-2])
+        if not changes:
+            return None
+        return sum(changes)
+
+    def _compute_iv_change(self, symbol: str) -> Optional[float]:
+        changes = []
+        for meta in self._option_instruments.values():
+            if meta.get("underlying") != symbol:
+                continue
+            key = meta.get("key")
+            history = self._iv_history.get(key)
+            if history and len(history) == 2:
+                changes.append(history[-1] - history[-2])
+        if not changes:
+            return None
+        return sum(changes) / len(changes)
+
+    def _compute_futures_oi_change(self, symbol: str) -> Optional[float]:
+        history = self._futures_oi_history.get(symbol)
+        if not history or len(history) < 2:
+            return None
+        return history[-1] - history[-2]
+
+    def _get_delta_side(self, symbol: str, side: str) -> Optional[float]:
+        for meta in self._option_instruments.values():
+            if meta.get("underlying") == symbol and meta.get("side") == side:
+                key = meta.get("key")
+                if key and key in self._market_state.options:
+                    value = self._market_state.options[key].get("delta")
+                    try:
+                        if value is None:
+                            return None
+                        return float(value)
+                    except Exception:
+                        return None
+        return None
+
+    def _get_spread_pct(self, symbol: str, side: str) -> Optional[float]:
+        for meta in self._option_instruments.values():
+            if meta.get("underlying") == symbol and meta.get("side") == side:
+                key = meta.get("key")
+                if key and key in self._market_state.options:
+                    row = self._market_state.options[key]
+                    bid = row.get("bid")
+                    ask = row.get("ask")
+                    if bid is None or ask is None:
+                        return None
+                    try:
+                        bid_f = float(bid)
+                        ask_f = float(ask)
+                        mid = (bid_f + ask_f) / 2.0
+                        if mid <= 0:
+                            return None
+                        return ((ask_f - bid_f) / mid) * 100.0
+                    except Exception:
+                        return None
+        return None
 
     def _get_option_price(self, symbol: str, side: str) -> Optional[float]:
         spot = self._market_state.spot.get(symbol)
@@ -372,7 +547,96 @@ class OptionsRuntime:
             signal_type=signal_type,
         ):
             reasons.append("oi_volume_not_confirmed")
+        if force_direction is None and signal_type:
+            reasons.extend(self._strict_gate_failures(symbol, indicator, signal_type))
         return reasons
+
+    def _strict_gate_failures(self, symbol: str, indicator: Dict[str, Any], signal_type: str) -> list[str]:
+        failures: list[str] = []
+        if not self._strict_cfg:
+            return failures
+
+        close_5m = indicator.get("close_5m")
+        vwap_5m = indicator.get("vwap_5m")
+        if close_5m is None or vwap_5m is None:
+            failures.append("missing_5m_confirmation")
+        else:
+            if signal_type == "BUY_CE" and not (float(close_5m) > float(vwap_5m)):
+                failures.append("vwap_5m_not_bullish")
+            if signal_type == "BUY_PE" and not (float(close_5m) < float(vwap_5m)):
+                failures.append("vwap_5m_not_bearish")
+
+        ce_change = indicator.get("oi_change_ce")
+        pe_change = indicator.get("oi_change_pe")
+        if ce_change is None or pe_change is None:
+            failures.append("missing_atm_oi_shift")
+        else:
+            if signal_type == "BUY_CE" and not (float(ce_change) < 0 and float(pe_change) > 0):
+                failures.append("atm_oi_shift_invalid_for_ce")
+            if signal_type == "BUY_PE" and not (float(pe_change) < 0 and float(ce_change) > 0):
+                failures.append("atm_oi_shift_invalid_for_pe")
+
+        futures_oi_change = indicator.get("futures_oi_change")
+        require_futures = bool(self._strict_cfg.get("require_futures_oi_confirmation", False))
+        if require_futures:
+            if futures_oi_change is None:
+                failures.append("missing_futures_oi_change")
+            elif float(futures_oi_change) <= 0:
+                failures.append("futures_oi_not_rising")
+
+        iv_change = indicator.get("iv_change")
+        if iv_change is None:
+            failures.append("missing_iv_change")
+        elif float(iv_change) < 0:
+            failures.append("iv_falling")
+
+        spread_key = "spread_ce_pct" if signal_type == "BUY_CE" else "spread_pe_pct"
+        spread_pct = indicator.get(spread_key)
+        max_spread_pct = float(self._strict_cfg.get("max_spread_pct", 0.6))
+        if spread_pct is None:
+            failures.append("missing_bid_ask_spread")
+        elif float(spread_pct) > max_spread_pct:
+            failures.append("spread_too_wide")
+
+        option_side = "CE" if signal_type == "BUY_CE" else "PE"
+        option_price = self._get_option_price(symbol, option_side)
+        if option_price is None:
+            failures.append("missing_option_price_for_premium")
+
+        delta_key = "delta_ce" if signal_type == "BUY_CE" else "delta_pe"
+        delta_value = indicator.get(delta_key)
+        if delta_value is None:
+            failures.append("missing_option_delta")
+        else:
+            abs_delta = abs(float(delta_value))
+            if abs_delta < float(self._strict_cfg.get("delta_min_abs", 0.40)):
+                failures.append("delta_below_min")
+            if abs_delta > float(self._strict_cfg.get("delta_max_abs", 0.55)):
+                failures.append("delta_above_max")
+            if abs_delta < float(self._strict_cfg.get("delta_reject_below_abs", 0.30)):
+                failures.append("delta_rejected_below_floor")
+
+        if self._is_major_event_day() and bool(self._strict_cfg.get("block_intraday_on_major_event", True)):
+            failures.append("major_event_day_block")
+
+        score_cfg = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
+        intraday_window = score_cfg.get("intraday_window", ["09:45", "13:30"])
+        if not self._is_within_window(indicator.get("ts"), intraday_window):
+            failures.append("outside_intraday_window")
+
+        return failures
+
+    def _is_within_window(self, ts_value: Any, window: Any) -> bool:
+        if not isinstance(window, list) or len(window) != 2:
+            return False
+        try:
+            ts = datetime.fromisoformat(str(ts_value)).astimezone(IST)
+            sh, sm = [int(x) for x in str(window[0]).split(":", 1)]
+            eh, em = [int(x) for x in str(window[1]).split(":", 1)]
+            now_hm = (ts.hour, ts.minute)
+            return (sh, sm) <= now_hm <= (eh, em)
+        except Exception:
+            return False
 
     def _compute_signal(self, symbol: str, indicator: Optional[Dict[str, Any]], overrides: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         if not indicator:
@@ -387,12 +651,6 @@ class OptionsRuntime:
         history = self._history.get(symbol)
         if not history or len(history) < 2:
             return None
-        prev = history[-2]
-        prev_closes = [c.close for c in list(history)[:-1]]
-        prev_fast = ema(prev_closes, int(self._strategy_cfg.get("ema_fast", 9)))
-        prev_slow = ema(prev_closes, int(self._strategy_cfg.get("ema_slow", 21)))
-        if prev_fast is None or prev_slow is None:
-            return None
 
         overrides = overrides or {}
         signal_cfg = self._strategy_cfg.get("signal", {})
@@ -402,10 +660,13 @@ class OptionsRuntime:
         cooldown_minutes = int(overrides.get("cooldown_minutes", signal_cfg.get("cooldown_minutes", 5)))
 
         signal_type = None
-        if prev_fast <= prev_slow and ema_fast > ema_slow and closes >= vwap_value:
-            signal_type = "BUY_CE"
-        elif prev_fast >= prev_slow and ema_fast < ema_slow and closes <= vwap_value:
-            signal_type = "BUY_PE"
+        close_5m = indicator.get("close_5m")
+        vwap_5m = indicator.get("vwap_5m")
+        if close_5m is not None and vwap_5m is not None:
+            if float(close_5m) > float(vwap_5m):
+                signal_type = "BUY_CE"
+            elif float(close_5m) < float(vwap_5m):
+                signal_type = "BUY_PE"
         force_direction = overrides.get("force_direction")
         if force_direction in ("BUY_CE", "BUY_PE"):
             signal_type = force_direction
@@ -413,7 +674,7 @@ class OptionsRuntime:
             self._last_no_trade_reasons[symbol] = {
                 "symbol": symbol,
                 "ts": indicator.get("ts"),
-                "reasons": ["no_directional_setup"],
+                "reasons": ["no_directional_setup", "missing_5m_confirmation"],
             }
             return None
 
@@ -428,6 +689,18 @@ class OptionsRuntime:
             }
             return None
         entry = option_price
+
+        if force_direction is None:
+            strict_failures = self._strict_gate_failures(symbol, indicator, signal_type)
+            if strict_failures:
+                self._last_no_trade_reasons[symbol] = {
+                    "symbol": symbol,
+                    "ts": indicator.get("ts"),
+                    "signal_type": signal_type,
+                    "reasons": strict_failures,
+                }
+                logger.info("Options signal blocked for %s: %s", symbol, ",".join(strict_failures))
+                return None
 
         # Market regime / time filters
         try:
@@ -504,6 +777,31 @@ class OptionsRuntime:
             "target": round(target, 2),
             "rr": round(rr, 2),
         }
+        score_cfg = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
+        intraday_window = score_cfg.get("intraday_window", ["09:45", "13:30"])
+        if not isinstance(intraday_window, list) or len(intraday_window) != 2:
+            intraday_window = ["09:45", "13:30"]
+        event_risk_blocked = bool(indicator.get("event_risk_blocked", False))
+        confidence_score, confidence_breakdown = calculate_confidence_score(
+            signal_type=signal_type,
+            indicator=indicator,
+            weights=score_cfg.get("weights") if isinstance(score_cfg.get("weights"), dict) else None,
+            event_risk_blocked=event_risk_blocked,
+            intraday_window=(str(intraday_window[0]), str(intraday_window[1])),
+        )
+        min_project_score = int(score_cfg.get("min_score", 70))
+        if force_direction is None and confidence_score < min_project_score:
+            self._last_no_trade_reasons[symbol] = {
+                "symbol": symbol,
+                "ts": indicator.get("ts"),
+                "signal_type": signal_type,
+                "reasons": ["project_confidence_below_threshold"],
+                "confidence_score": confidence_score,
+                "required_min": min_project_score,
+                "breakdown": confidence_breakdown,
+            }
+            return None
+
         min_conf = float(signal_cfg.get("min_confidence", 0.62))
         base_conf = rule_based_confidence(pre_signal, indicator)
         if force_direction is None and base_conf < min_conf:
@@ -548,6 +846,8 @@ class OptionsRuntime:
             "atr": indicator.get("atr"),
             "pcr": indicator.get("pcr"),
             "confidence_base": base_conf,
+            "confidence_score": confidence_score,
+            "confidence_breakdown": confidence_breakdown,
             "ml_score": round(ml_score, 3),
             "_ml_features": features,
         }
@@ -556,12 +856,27 @@ class OptionsRuntime:
         return signal
 
     def _risk_allows(self, risk: float) -> bool:
-        today = datetime.utcnow().date().isoformat()
-        if self._risk_state["date"] != today:
-            self._risk_state = {"date": today, "trades": 0, "risk_used": 0.0}
+        self._refresh_risk_state()
         max_trades = float(self._config_engine.get_options_setting("options", "risk", "max_trades_per_day"))
         max_loss = float(self._config_engine.get_options_setting("options", "risk", "max_loss_per_day"))
+        capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
+        monthly_capital = self._get_monthly_capital() or 0.0
+        weekly_loss_cap = float(capital_cfg.get("weekly_max_loss_pct", 0.25)) * monthly_capital
+
+        if self._risk_state.get("daily_sl_hits", 0) >= 1:
+            return False
+        if self._risk_state.get("consecutive_losses", 0) >= 2:
+            return False
+        if weekly_loss_cap > 0 and float(self._risk_state.get("weekly_realized_pnl", 0.0)) <= -weekly_loss_cap:
+            return False
+        dd_action = self._drawdown_action()
+        if dd_action == "stop_month":
+            return False
+        if dd_action == "reduce_trades_1" and self._risk_state["trades"] >= 1:
+            return False
         if self._risk_state["trades"] >= max_trades:
+            return False
+        if float(self._risk_state.get("daily_realized_pnl", 0.0)) <= -max_loss:
             return False
         if self._risk_state["risk_used"] + risk > max_loss:
             return False
@@ -570,6 +885,49 @@ class OptionsRuntime:
     def _record_risk(self, risk: float) -> None:
         self._risk_state["trades"] += 1
         self._risk_state["risk_used"] += risk
+
+    def _current_week_key(self) -> str:
+        now = datetime.now(IST)
+        return f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+
+    def _refresh_risk_state(self) -> None:
+        today = datetime.now(IST).date().isoformat()
+        week = self._current_week_key()
+        if self._risk_state.get("date") != today:
+            self._risk_state["date"] = today
+            self._risk_state["trades"] = 0
+            self._risk_state["risk_used"] = 0.0
+            self._risk_state["daily_realized_pnl"] = 0.0
+            self._risk_state["daily_sl_hits"] = 0
+        if self._risk_state.get("week") != week:
+            self._risk_state["week"] = week
+            self._risk_state["weekly_realized_pnl"] = 0.0
+        self._risk_state["monthly_realized_pnl"] = self._monthly_realized_pnl()
+
+    def _monthly_realized_pnl(self) -> float:
+        month_key = self._current_month_key()
+        pnl = 0.0
+        for row in self._paper_trades:
+            if row.get("type") != "close":
+                continue
+            ts = str(row.get("exit_ts", ""))[:7]
+            if ts == month_key:
+                pnl += float(row.get("realized_pnl", 0.0))
+        return round(pnl, 2)
+
+    def _drawdown_action(self) -> str:
+        capital = self._get_monthly_capital()
+        if not capital or capital <= 0:
+            return "none"
+        pnl = float(self._risk_state.get("monthly_realized_pnl", 0.0))
+        dd_pct = (-pnl / capital) * 100.0 if pnl < 0 else 0.0
+        if dd_pct >= 30:
+            return "stop_month"
+        if dd_pct >= 20:
+            return "intraday_only"
+        if dd_pct >= 10:
+            return "reduce_trades_1"
+        return "none"
 
     async def _notify_signal(self, signal: Dict[str, Any]) -> None:
         if signal.get("blocked"):
@@ -592,11 +950,35 @@ class OptionsRuntime:
         pcr_text = f"{pcr:.3f}" if isinstance(pcr, (int, float)) else "NA"
         conf = signal.get("confidence")
         conf_text = f"{conf:.2f}" if isinstance(conf, (int, float)) else str(conf)
+        project_conf = signal.get("confidence_project")
+        project_conf_text = str(project_conf) if project_conf is not None else "NA"
+        monthly_capital = signal.get("monthly_capital")
+        monthly_cap_text = f"₹{monthly_capital:,.0f}" if isinstance(monthly_capital, (int, float)) else "NA"
+        sl_pct = 0.0
+        if signal.get("entry"):
+            try:
+                sl_pct = max(0.0, (float(signal.get("entry")) - float(signal.get("stop_loss"))) / float(signal.get("entry")) * 100.0)
+            except Exception:
+                sl_pct = 0.0
+        target_pct = 0.0
+        if signal.get("entry"):
+            try:
+                target_pct = max(0.0, (float(signal.get("target")) - float(signal.get("entry"))) / float(signal.get("entry")) * 100.0)
+            except Exception:
+                target_pct = 0.0
+        risk_per_trade = risk_per_unit * qty
+        target_value = reward_per_unit * qty
         text = (
+            f"[{signal.get('symbol')}] - [{signal.get('market_bias')}]\n"
+            f"Monthly Capital: {monthly_cap_text}\n"
+            f"Setup: Intraday\n"
+            f"Strike: {signal.get('strike')} {signal.get('option_side')}\n"
+            f"Reason: VWAP + OI + Futures + IV\n"
+            f"Risk per Trade: ₹{risk_per_trade:,.2f}\n"
+            f"SL: {sl_pct:.1f}% (₹{risk_per_trade:,.2f})\n"
+            f"Target: {target_pct:.1f}% (₹{target_value:,.2f})\n"
+            f"Confidence Score: {project_conf_text}/100\n\n"
             f"📈 *OPTIONS INTRADAY SIGNAL*\n\n"
-            f"Index: {signal.get('symbol')}\n"
-            f"Option: {signal.get('strike')} {signal.get('option_side')} | Expiry: {signal.get('expiry')}\n"
-            f"Trade Type: {signal.get('trade_type')}\n\n"
             f"Entry: {signal.get('entry')}\n"
             f"Stop Loss: {signal.get('stop_loss')}\n"
             f"Target 1: {signal.get('target')}\n"
@@ -694,6 +1076,17 @@ class OptionsRuntime:
         pos["realized_pnl"] = round((exit_price - pos["entry"]) * pos["qty"], 2)
         pos["exit_reason"] = reason
         self._paper_trades.append({"type": "close", **pos})
+        self._refresh_risk_state()
+        realized = float(pos.get("realized_pnl") or 0.0)
+        self._risk_state["daily_realized_pnl"] = round(float(self._risk_state.get("daily_realized_pnl", 0.0)) + realized, 2)
+        self._risk_state["weekly_realized_pnl"] = round(float(self._risk_state.get("weekly_realized_pnl", 0.0)) + realized, 2)
+        if reason == "stop_loss":
+            self._risk_state["daily_sl_hits"] = int(self._risk_state.get("daily_sl_hits", 0)) + 1
+        if realized < 0:
+            self._risk_state["consecutive_losses"] = int(self._risk_state.get("consecutive_losses", 0)) + 1
+        else:
+            self._risk_state["consecutive_losses"] = 0
+        self._risk_state["monthly_realized_pnl"] = self._monthly_realized_pnl()
         features = pos.get("ml_features")
         if isinstance(features, dict):
             self._learner.observe(features, won=bool(pos["realized_pnl"] > 0))
@@ -881,6 +1274,14 @@ class OptionsRuntime:
         except Exception:
             return True
 
+    def _is_major_event_day(self) -> bool:
+        events_cfg = (self._project_cfg.get("event_calendar") or {}) if isinstance(self._project_cfg, dict) else {}
+        dates = events_cfg.get("major_event_dates", []) or []
+        if not isinstance(dates, list):
+            return False
+        today = datetime.now(IST).date().isoformat()
+        return today in [str(d) for d in dates]
+
     def _build_forced_signal(
         self,
         symbol: str,
@@ -893,6 +1294,17 @@ class OptionsRuntime:
         sl_pct = float(overrides.get("sl_pct", signal_cfg.get("sl_pct", 0.006)))
         target_pct = float(overrides.get("target_pct", signal_cfg.get("target_pct", 0.012)))
         entry = float(option_price)
+        score_cfg = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
+        intraday_window = score_cfg.get("intraday_window", ["09:45", "13:30"])
+        if not isinstance(intraday_window, list) or len(intraday_window) != 2:
+            intraday_window = ["09:45", "13:30"]
+        confidence_score, confidence_breakdown = calculate_confidence_score(
+            signal_type=force_direction,
+            indicator=indicator,
+            weights=score_cfg.get("weights") if isinstance(score_cfg.get("weights"), dict) else None,
+            event_risk_blocked=bool(indicator.get("event_risk_blocked", False)),
+            intraday_window=(str(intraday_window[0]), str(intraday_window[1])),
+        )
         # Forced signals also represent long options in both directions.
         sl = entry * (1 - sl_pct)
         target = entry * (1 + target_pct)
@@ -909,6 +1321,8 @@ class OptionsRuntime:
             "blocked": False,
             "entry_source": "option_ltp",
             "forced": True,
+            "confidence_score": confidence_score,
+            "confidence_breakdown": confidence_breakdown,
         }
 
     def _maybe_end_of_day(self, ts: datetime) -> None:
@@ -1044,6 +1458,7 @@ class OptionsRuntime:
         signal["risk_per_unit"] = round(risk_unit, 2)
         signal["reward_per_unit"] = round(reward_unit, 2)
         signal["target2"] = round(signal.get("entry") + (signal.get("target") - signal.get("entry")) * 1.5, 2)
+        signal["monthly_capital"] = self._get_monthly_capital()
 
         confidence = signal.get("confidence_base")
         if confidence is None:
@@ -1052,6 +1467,7 @@ class OptionsRuntime:
         if adj is not None:
             confidence = max(0.0, min(1.0, round(confidence + adj, 3)))
         signal["confidence"] = confidence
+        signal["confidence_project"] = signal.get("confidence_score")
         min_conf = float(self._strategy_cfg.get("signal", {}).get("min_confidence", 0.62))
         if not signal.get("forced") and confidence < min_conf:
             return
@@ -1064,3 +1480,171 @@ class OptionsRuntime:
             self._refresh_paper_state()
         await self._persist_signal(signal)
         await self._notify_signal(signal)
+
+    def _get_monthly_capital(self) -> float | None:
+        capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
+        overrides = capital_cfg.get("monthly_capital_overrides") or {}
+        if isinstance(overrides, dict):
+            month_key = self._current_month_key()
+            if month_key in overrides:
+                try:
+                    return float(overrides[month_key])
+                except Exception:
+                    pass
+        value = capital_cfg.get("monthly_capital")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def get_project_check(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        self._refresh_risk_state()
+        score_cfg = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
+        min_project_score = int(score_cfg.get("min_score", 70))
+        intraday_window = score_cfg.get("intraday_window", ["09:45", "13:30"])
+        if not isinstance(intraday_window, list) or len(intraday_window) != 2:
+            intraday_window = ["09:45", "13:30"]
+
+        symbols = sorted(self._allowed_symbols)
+        if symbol:
+            symbols = [s for s in symbols if s == symbol]
+
+        checks = []
+        diagnostics = self.get_no_trade_diagnostics().get("diagnostics", {})
+        for s in symbols:
+            indicator = self._market_state.indicators.get(f"1m:{s}")
+            if not indicator:
+                checks.append({
+                    "symbol": s,
+                    "status": "NO_DATA",
+                    "reason": "missing_indicator",
+                })
+                continue
+
+            ce_score, ce_breakdown = calculate_confidence_score(
+                signal_type="BUY_CE",
+                indicator=indicator,
+                weights=score_cfg.get("weights") if isinstance(score_cfg.get("weights"), dict) else None,
+                event_risk_blocked=bool(indicator.get("event_risk_blocked", False)),
+                intraday_window=(str(intraday_window[0]), str(intraday_window[1])),
+            )
+            pe_score, pe_breakdown = calculate_confidence_score(
+                signal_type="BUY_PE",
+                indicator=indicator,
+                weights=score_cfg.get("weights") if isinstance(score_cfg.get("weights"), dict) else None,
+                event_risk_blocked=bool(indicator.get("event_risk_blocked", False)),
+                intraday_window=(str(intraday_window[0]), str(intraday_window[1])),
+            )
+            diag = diagnostics.get(s, {})
+            reasons = diag.get("reasons", [])
+            ce_failures = self._strict_gate_failures(s, indicator, "BUY_CE")
+            pe_failures = self._strict_gate_failures(s, indicator, "BUY_PE")
+            ce_gates = self._gate_status(ce_failures)
+            pe_gates = self._gate_status(pe_failures)
+            checks.append({
+                "symbol": s,
+                "spot": self._market_state.spot.get(s),
+                "vwap": indicator.get("vwap"),
+                "ema_fast": indicator.get("ema_fast"),
+                "ema_slow": indicator.get("ema_slow"),
+                "oi_change": indicator.get("oi_change"),
+                "atr": indicator.get("atr"),
+                "diagnostic_reasons": reasons,
+                "ce": {
+                    "confidence_score": ce_score,
+                    "passes_threshold": ce_score >= min_project_score,
+                    "breakdown": ce_breakdown,
+                    "gates": ce_gates,
+                    "gate_failures": ce_failures,
+                },
+                "pe": {
+                    "confidence_score": pe_score,
+                    "passes_threshold": pe_score >= min_project_score,
+                    "breakdown": pe_breakdown,
+                    "gates": pe_gates,
+                    "gate_failures": pe_failures,
+                },
+            })
+
+        risk_cfg = self._config_engine.get_options_setting("options", "risk")
+        futures_ready = self._futures_config_status()
+        return {
+            "enabled": self._enabled,
+            "month": self._current_month_key(),
+            "monthly_capital": self._get_monthly_capital(),
+            "project_min_score": min_project_score,
+            "major_event_day": self._is_major_event_day(),
+            "futures_config": futures_ready,
+            "risk_limits": {
+                "max_trades_per_day": risk_cfg.get("max_trades_per_day"),
+                "max_loss_per_day": risk_cfg.get("max_loss_per_day"),
+                "drawdown_action": self._drawdown_action(),
+                "risk_state": dict(self._risk_state),
+            },
+            "checks": checks,
+        }
+
+    def _futures_config_status(self) -> Dict[str, Any]:
+        require_futures = bool(self._strict_cfg.get("require_futures_oi_confirmation", False))
+        required = sorted(self._allowed_symbols)
+        configured = sorted(set(self._futures_by_key.values()))
+        missing = [s for s in required if s not in configured]
+        return {
+            "required": require_futures,
+            "required_underlyings": required,
+            "configured_underlyings": configured,
+            "missing_underlyings": missing,
+            "ready": (not require_futures) or len(missing) == 0,
+        }
+
+    @staticmethod
+    def _gate_status(failures: list[str]) -> Dict[str, bool]:
+        failed = set(failures)
+        return {
+            "vwap_5m": "missing_5m_confirmation" not in failed and "vwap_5m_not_bullish" not in failed and "vwap_5m_not_bearish" not in failed,
+            "atm_oi_shift": "missing_atm_oi_shift" not in failed and "atm_oi_shift_invalid_for_ce" not in failed and "atm_oi_shift_invalid_for_pe" not in failed,
+            "futures_oi": "missing_futures_oi_change" not in failed and "futures_oi_not_rising" not in failed,
+            "iv_direction": "missing_iv_change" not in failed and "iv_falling" not in failed,
+            "spread_liquidity": "missing_bid_ask_spread" not in failed and "spread_too_wide" not in failed,
+            "premium_live": "missing_option_price_for_premium" not in failed,
+            "delta_filter": "missing_option_delta" not in failed and "delta_below_min" not in failed and "delta_above_max" not in failed and "delta_rejected_below_floor" not in failed,
+            "time_window": "outside_intraday_window" not in failed,
+            "event_day": "major_event_day_block" not in failed,
+        }
+
+    def set_monthly_capital(self, amount: float, month: Optional[str] = None) -> Dict[str, Any]:
+        if amount <= 0:
+            raise ValueError("monthly_capital must be > 0")
+        target_month = month or self._current_month_key()
+        capital_cfg = self._project_cfg.setdefault("capital", {})
+        overrides = capital_cfg.setdefault("monthly_capital_overrides", {})
+        overrides[target_month] = float(amount)
+        self._apply_project_capital_rules()
+        return {
+            "month": target_month,
+            "monthly_capital": self._get_monthly_capital(),
+            "applied": True,
+        }
+
+    def _apply_project_capital_rules(self) -> None:
+        capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
+        monthly_capital = self._get_monthly_capital()
+        if monthly_capital is None or monthly_capital <= 0:
+            return
+
+        risk_cfg = self._config_engine.get_options_setting("options", "risk")
+        signal_cfg = self._strategy_cfg.get("signal", {}) if isinstance(self._strategy_cfg, dict) else {}
+
+        risk_per_trade_pct = float(capital_cfg.get("risk_per_trade_pct", 0.08))
+        max_risk_per_trade_pct = float(capital_cfg.get("max_risk_per_trade_pct", 0.10))
+        risk_per_trade = monthly_capital * risk_per_trade_pct
+        risk_per_trade_cap = monthly_capital * max_risk_per_trade_pct
+        signal_cfg["risk_per_trade"] = round(min(risk_per_trade, risk_per_trade_cap), 2)
+
+        daily_max_loss_pct = float(capital_cfg.get("daily_max_loss_pct", 0.12))
+        risk_cfg["max_loss_per_day"] = round(monthly_capital * daily_max_loss_pct, 2)
+
+        max_trades_per_day = int(capital_cfg.get("max_trades_per_day", risk_cfg.get("max_trades_per_day", 2)))
+        risk_cfg["max_trades_per_day"] = max_trades_per_day

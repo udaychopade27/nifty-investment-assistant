@@ -1,41 +1,43 @@
 options:
   enabled: true
   symbols:
-    - NIFTY
-    - BANKNIFTY
+  - NIFTY
+  - BANKNIFTY
   market_data:
     spot_symbols:
-      - NIFTY50
-      - BANKNIFTY
+    - NIFTY50
+    - BANKNIFTY
     option_symbols: []
     option_instrument_keys: []
+    futures_instrument_keys: []
+    futures_instruments: []
     option_instruments:
-      - underlying: "NIFTY 50"
-        strike: "ATM"
-        step: 50
-        side: "CE"
-        key: null
-      - underlying: "NIFTY 50"
-        strike: "ATM"
-        step: 50
-        side: "PE"
-        key: null
-      - underlying: "NIFTY BANK"
-        strike: "ATM"
-        step: 100
-        side: "CE"
-        key: null
-      - underlying: "NIFTY BANK"
-        strike: "ATM"
-        step: 100
-        side: "PE"
-        key: null
+    - underlying: NIFTY 50
+      strike: ATM
+      step: 50
+      side: CE
+      key: null
+    - underlying: NIFTY 50
+      strike: ATM
+      step: 50
+      side: PE
+      key: null
+    - underlying: NIFTY BANK
+      strike: ATM
+      step: 100
+      side: CE
+      key: null
+    - underlying: NIFTY BANK
+      strike: ATM
+      step: 100
+      side: PE
+      key: null
     subscription_mode: full
     realtime_key_mode: combined
   market:
     timezone: Asia/Kolkata
-    open_time: "09:15"
-    close_time: "15:30"
+    open_time: 09:15
+    close_time: '15:30'
   strategy:
     timeframe_minutes: 1
     ema_fast: 9
@@ -49,7 +51,7 @@ options:
       min_rr: 1.5
       min_confidence: 0.62
       cooldown_minutes: 5
-      strike_preference: "ATM"   # ATM | ITM | OTM | AUTO
+      strike_preference: ATM
       use_atr_sl_tp: true
       require_atr: true
       atr_window: 14
@@ -80,8 +82,8 @@ options:
       trail_breakeven_buffer_pct: 0.0005
       ml:
         enabled: true
-        model_path: "data/options_paper_model.json"
-        samples_path: "data/options_paper_samples.jsonl"
+        model_path: data/options_paper_model.json
+        samples_path: data/options_paper_samples.jsonl
         learning_rate: 0.04
         min_score: 0.45
         warmup_trades: 20
@@ -89,8 +91,8 @@ options:
     max_trades_per_day: 3
     max_loss_per_day: 1000
     no_trade_windows:
-      - "09:15-09:25"
-      - "15:00-15:30"
+    - 09:15-09:25
+    - 15:00-15:30
     flat_atr_threshold: 0.2
   paper_trading:
     enabled: true
@@ -98,3 +100,35 @@ options:
     slippage_pct: 0.0
     mid_vol_slippage_pct: 0.1
     high_vol_slippage_pct: 0.2
+  project:
+    strict_requirements:
+      require_futures_oi_confirmation: false
+      vwap_5m_window: 20
+      max_spread_pct: 0.6
+      delta_min_abs: 0.4
+      delta_max_abs: 0.55
+      delta_reject_below_abs: 0.3
+      block_intraday_on_major_event: true
+    event_calendar:
+      major_event_dates: []
+    confidence:
+      min_score: 70
+      intraday_window:
+      - 09:45
+      - '13:30'
+      weights:
+        vwap_alignment: 25
+        atm_oi_behavior: 25
+        futures_confirmation: 20
+        iv_direction: 15
+        time_of_day: 10
+        event_risk: 5
+    capital:
+      monthly_capital: 15000
+      risk_per_trade_pct: 0.08
+      max_risk_per_trade_pct: 0.1
+      daily_max_loss_pct: 0.12
+      weekly_max_loss_pct: 0.25
+      max_trades_per_day: 2
+      monthly_capital_overrides:
+        2026-02: 18000.0

@@ -17,12 +17,17 @@ class Candle:
 class CandleBuilder:
     """Stateful builder for 1-minute candles per symbol."""
 
-    def __init__(self):
+    def __init__(self, interval_seconds: int = 60):
         self._current: Optional[Candle] = None
+        self._interval_seconds = max(60, int(interval_seconds))
+
+    def _bucket_start(self, ts: datetime) -> datetime:
+        minute = ts.minute - (ts.minute % (self._interval_seconds // 60))
+        return ts.replace(minute=minute, second=0, microsecond=0)
 
     def update(self, ts: datetime, price: float, volume: float) -> Optional[Candle]:
         """Update with a tick; returns a finalized candle when minute rolls."""
-        bucket = ts.replace(second=0, microsecond=0)
+        bucket = self._bucket_start(ts)
         if self._current is None:
             self._current = Candle(
                 ts=bucket,

@@ -147,13 +147,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     except Exception as e:
         logger.error(f"❌ Failed to start realtime runtime: {e}")
 
-    # Start options runtime if enabled
-    try:
-        options_runtime = OptionsRuntime(config_engine, realtime_runtime)
-        await options_runtime.start()
-        app.state.options_runtime = options_runtime
-    except Exception as e:
-        logger.error(f"❌ Failed to start options runtime: {e}")
+    # Start options runtime if enabled for this service
+    if settings.OPTIONS_RUNTIME_ENABLED:
+        try:
+            options_runtime = OptionsRuntime(config_engine, realtime_runtime)
+            await options_runtime.start()
+            app.state.options_runtime = options_runtime
+            logger.info("📈 Options runtime initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to start options runtime: {e}")
+    else:
+        logger.info("📉 Options runtime disabled for this service")
     
     # Start Telegram bot (async, no threads!)
     if settings.TELEGRAM_ENABLED and settings.TELEGRAM_BOT_TOKEN:
