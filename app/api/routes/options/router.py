@@ -5,11 +5,13 @@ from app.domain.services.config_engine import ConfigEngine
 from app.infrastructure.market_data.options.subscription_manager import OptionsSubscriptionManager
 from pathlib import Path
 from datetime import date as date_type
+from datetime import date
 import yaml
 
 from app.infrastructure.db.database import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.infrastructure.repositories.options.signal_repository import OptionsSignalRepository
+from app.infrastructure.repositories.options.capital_repository import OptionsCapitalRepository
 from app.infrastructure.market_data.options.chain_resolver import OptionsChainResolver
 
 router = APIRouter()
@@ -21,9 +23,13 @@ class OptionsCapitalUpdateRequest(BaseModel):
         default=None,
         description="Optional YYYY-MM override (e.g. 2026-02). Defaults to current IST month.",
     )
-    mode: str | None = Field(
-        default="add",
-        description="Capital update mode: 'add' (default) adds to month capital, 'replace' overwrites.",
+
+
+class OptionsCapitalTopupRequest(BaseModel):
+    topup_amount: float = Field(..., gt=0)
+    month: str | None = Field(
+        default=None,
+        description="Optional YYYY-MM override (e.g. 2026-02). Defaults to current IST month.",
     )
 
 
@@ -208,19 +214,65 @@ async def options_replay_signal(
 async def options_set_monthly_capital(
     request: Request,
     payload: OptionsCapitalUpdateRequest,
+    db: AsyncSession = Depends(get_db),
 ):
     runtime = getattr(request.app.state, "options_runtime", None)
     if not runtime:
         raise HTTPException(status_code=400, detail="Options runtime not available")
 
     try:
-        mode = (payload.mode or "add").strip().lower()
-        if mode not in ("add", "replace"):
-            raise HTTPException(status_code=400, detail="mode must be 'add' or 'replace'")
-        update = runtime.set_monthly_capital(payload.monthly_capital, month=payload.month, mode=mode)
+        update = runtime.initialize_monthly_capital(payload.monthly_capital, month=payload.month)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    config_path = _persist_capital_override(update)
+    await _persist_capital_audit(db, update, amount=float(payload.monthly_capital))
+    return {
+        "status": "ok",
+        "persisted_file": str(config_path),
+        **update,
+    }
+
+
+@router.post("/capital/topup")
+async def options_topup_monthly_capital(
+    request: Request,
+    payload: OptionsCapitalTopupRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        raise HTTPException(status_code=400, detail="Options runtime not available")
+
+    try:
+        update = runtime.topup_monthly_capital(payload.topup_amount, month=payload.month)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    config_path = _persist_capital_override(update)
+    await _persist_capital_audit(db, update, amount=float(payload.topup_amount))
+    return {
+        "status": "ok",
+        "persisted_file": str(config_path),
+        **update,
+    }
+
+
+@router.get("/capital/events")
+async def options_capital_events(
+    month: str | None = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+):
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    repo = OptionsCapitalRepository(db)
+    month_date = _month_key_to_date(month) if month else None
+    items = await repo.get_events(month=month_date, limit=limit)
+    return {"count": len(items), "items": items}
+
+
+def _persist_capital_override(update: dict) -> Path:
     config_path = Path(__file__).resolve().parents[4] / "config" / "options" / "options.yml"
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
@@ -233,9 +285,34 @@ async def options_set_monthly_capital(
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
+    return config_path
 
-    return {
-        "status": "ok",
-        "persisted_file": str(config_path),
-        **update,
-    }
+
+def _month_key_to_date(month_key: str) -> date:
+    try:
+        y, m = [int(x) for x in str(month_key).split("-", 1)]
+        return date(y, m, 1)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM")
+
+
+async def _persist_capital_audit(db: AsyncSession, update: dict, amount: float) -> None:
+    repo = OptionsCapitalRepository(db)
+    month_key = str(update.get("month"))
+    month_date = _month_key_to_date(month_key)
+    monthly_capital = float(update.get("monthly_capital") or 0.0)
+    initialized = bool(update.get("initialized_for_month", False))
+    mode = str(update.get("mode") or "unknown")
+    rollover_applied = float(update.get("rollover_applied") or 0.0)
+    previous = update.get("previous_monthly_capital")
+    previous_capital = float(previous) if previous is not None else None
+    await repo.upsert_month(month=month_date, monthly_capital=monthly_capital, initialized=initialized)
+    await repo.add_event(
+        month=month_date,
+        event_type=mode,
+        amount=amount,
+        rollover_applied=rollover_applied,
+        previous_capital=previous_capital,
+        new_capital=monthly_capital,
+        payload=update,
+    )

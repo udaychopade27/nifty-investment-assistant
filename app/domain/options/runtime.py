@@ -1122,6 +1122,9 @@ class OptionsRuntime:
 
     def _monthly_realized_pnl(self) -> float:
         month_key = self._current_month_key()
+        return self._realized_pnl_for_month(month_key)
+
+    def _realized_pnl_for_month(self, month_key: str) -> float:
         pnl = 0.0
         for row in self._paper_trades:
             if row.get("type") != "close":
@@ -1130,6 +1133,31 @@ class OptionsRuntime:
             if ts == month_key:
                 pnl += float(row.get("realized_pnl", 0.0))
         return round(pnl, 2)
+
+    @staticmethod
+    def _previous_month_key(month_key: str) -> str:
+        try:
+            year, month = [int(x) for x in month_key.split("-", 1)]
+            if month == 1:
+                return f"{year - 1}-12"
+            return f"{year}-{month - 1:02d}"
+        except Exception:
+            now = datetime.now(IST)
+            if now.month == 1:
+                return f"{now.year - 1}-12"
+            return f"{now.year}-{now.month - 1:02d}"
+
+    def _rollover_for_month(self, month_key: str) -> float:
+        capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
+        if not bool(capital_cfg.get("auto_carry_forward_unused", False)):
+            return 0.0
+        prev_month = self._previous_month_key(month_key)
+        prev_capital = self._get_monthly_capital_for_month(prev_month)
+        if prev_capital is None or prev_capital <= 0:
+            return 0.0
+        prev_realized = self._realized_pnl_for_month(prev_month)
+        remaining = float(prev_capital) + float(prev_realized)
+        return round(max(0.0, remaining), 2)
 
     def _drawdown_action(self) -> str:
         capital = self._get_monthly_capital()
@@ -1888,6 +1916,7 @@ class OptionsRuntime:
             "market_open_now": self._is_market_open_now(),
             "month": self._current_month_key(),
             "monthly_capital": self._get_monthly_capital(),
+            "capital_initialized_for_month": self._get_month_override_value(self._current_month_key()) is not None,
             "project_min_score": min_project_score,
             "major_event_day": self._is_major_event_day(),
             "major_event_window_now": self._is_major_event_window_now(),
@@ -1967,32 +1996,58 @@ class OptionsRuntime:
             "market_open": "market_closed" not in failed,
         }
 
-    def set_monthly_capital(self, amount: float, month: Optional[str] = None, mode: str = "add") -> Dict[str, Any]:
+    def initialize_monthly_capital(self, amount: float, month: Optional[str] = None) -> Dict[str, Any]:
         if amount <= 0:
             raise ValueError("monthly_capital must be > 0")
         target_month = month or self._current_month_key()
         capital_cfg = self._project_cfg.setdefault("capital", {})
         overrides = capital_cfg.setdefault("monthly_capital_overrides", {})
-        lock_after_first_set = bool(capital_cfg.get("lock_monthly_capital_after_first_set", True))
         month_override = self._get_month_override_value(target_month)
-        month_already_set = month_override is not None
-        existing = month_override if month_already_set else self._get_monthly_capital_for_month(target_month)
-        if mode == "replace":
-            if lock_after_first_set and month_already_set:
-                raise ValueError(
-                    f"monthly_capital for {target_month} is locked after first set; use mode='add'"
-                )
-            overrides[target_month] = float(amount)
-        else:
-            # For add mode, first set of month initializes from 0, subsequent calls top up.
-            base = float(month_override) if month_override is not None else 0.0
-            overrides[target_month] = round(base + float(amount), 2)
+        if month_override is not None:
+            raise ValueError(f"monthly_capital for {target_month} already initialized; use /capital/topup")
+        existing = self._get_monthly_capital_for_month(target_month)
+        rollover = self._rollover_for_month(target_month)
+        overrides[target_month] = round(float(amount) + float(rollover), 2)
+        self._apply_project_capital_rules()
+        self._record_audit(
+            "capital_init",
+            {
+                "month": target_month,
+                "previous_monthly_capital": existing,
+                "rollover_applied": rollover,
+                "new_monthly_capital": self._get_monthly_capital_for_month(target_month),
+            },
+        )
+        self._save_runtime_state()
+        return {
+            "month": target_month,
+            "monthly_capital": self._get_monthly_capital_for_month(target_month),
+            "previous_monthly_capital": existing,
+            "rollover_applied": rollover,
+            "mode": "init",
+            "initialized_for_month": True,
+            "applied": True,
+        }
+
+    def topup_monthly_capital(self, amount: float, month: Optional[str] = None) -> Dict[str, Any]:
+        if amount <= 0:
+            raise ValueError("topup_amount must be > 0")
+        target_month = month or self._current_month_key()
+        capital_cfg = self._project_cfg.setdefault("capital", {})
+        overrides = capital_cfg.setdefault("monthly_capital_overrides", {})
+        month_override = self._get_month_override_value(target_month)
+        existing = month_override if month_override is not None else self._get_monthly_capital_for_month(target_month)
+        rollover = self._rollover_for_month(target_month) if month_override is None else 0.0
+        base = float(month_override) if month_override is not None else float(rollover)
+        overrides[target_month] = round(base + float(amount), 2)
         self._apply_project_capital_rules()
         self._record_audit(
             "capital_update",
             {
                 "month": target_month,
-                "mode": mode,
+                "mode": "topup",
+                "topup_amount": float(amount),
+                "rollover_applied": rollover,
                 "previous_monthly_capital": existing,
                 "new_monthly_capital": self._get_monthly_capital_for_month(target_month),
             },
@@ -2002,10 +2057,17 @@ class OptionsRuntime:
             "month": target_month,
             "monthly_capital": self._get_monthly_capital_for_month(target_month),
             "previous_monthly_capital": existing,
-            "mode": mode,
-            "locked_after_first_set": lock_after_first_set,
+            "rollover_applied": rollover,
+            "mode": "topup",
+            "initialized_for_month": self._get_month_override_value(target_month) is not None,
             "applied": True,
         }
+
+    def set_monthly_capital(self, amount: float, month: Optional[str] = None, mode: str = "add") -> Dict[str, Any]:
+        # Backward compatibility for existing callers.
+        if mode == "replace":
+            return self.initialize_monthly_capital(amount, month=month)
+        return self.topup_monthly_capital(amount, month=month)
 
     def _get_month_override_value(self, month: str) -> float | None:
         capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}

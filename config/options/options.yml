@@ -149,6 +149,7 @@ options:
     capital:
       monthly_capital: 15000
       lock_monthly_capital_after_first_set: true
+      auto_carry_forward_unused: true
       risk_per_trade_pct: 0.08
       max_risk_per_trade_pct: 0.1
       daily_max_loss_pct: 0.12

@@ -184,6 +184,13 @@ class APIService {
       month
     });
   }
+
+  static topupOptionsCapital(topupAmount, month = null) {
+    return this.post('/api/v1/options/capital/topup', {
+      topup_amount: topupAmount,
+      month
+    });
+  }
 }
 
 // Dashboard Header Component
@@ -630,7 +637,7 @@ const MarketDataTrace = ({ trace, onRefresh }) => {
   );
 };
 
-const OptionsTradingOverview = ({ projectCheck, onSetCapital }) => {
+const OptionsTradingOverview = ({ projectCheck, onInitCapital, onTopupCapital }) => {
   if (!projectCheck) {
     return (
       <Card className="p-6">
@@ -642,6 +649,7 @@ const OptionsTradingOverview = ({ projectCheck, onSetCapital }) => {
   const risk = projectCheck.risk_limits || {};
   const riskState = risk.risk_state || {};
   const futuresCfg = projectCheck.futures_config || {};
+  const initialized = Boolean(projectCheck.capital_initialized_for_month);
 
   return (
     <Card className="p-6">
@@ -685,9 +693,20 @@ const OptionsTradingOverview = ({ projectCheck, onSetCapital }) => {
         </div>
       </div>
 
-      <Button variant="secondary" size="sm" className="mt-4 w-full" onClick={onSetCapital}>
-        Update Options Capital
-      </Button>
+      <div className="mt-4 space-y-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          className="w-full"
+          onClick={onInitCapital}
+          disabled={initialized}
+        >
+          {initialized ? 'Monthly Capital Locked' : 'Initialize Monthly Capital'}
+        </Button>
+        <Button variant="outline" size="sm" className="w-full" onClick={onTopupCapital}>
+          Add Extra Capital (Top-up)
+        </Button>
+      </div>
     </Card>
   );
 };
@@ -1535,18 +1554,43 @@ const ETFDashboard = () => {
     }
   };
 
-  const handleSetOptionsCapital = async () => {
-    const current = optionsProjectCheck?.monthly_capital ? Number(optionsProjectCheck.monthly_capital) : 15000;
-    const amountText = window.prompt('Set options monthly capital (INR):', String(current));
+  const handleInitOptionsCapital = async () => {
+    const initialized = Boolean(optionsProjectCheck?.capital_initialized_for_month);
+    if (initialized) {
+      alert('Monthly capital is already initialized for this month. Use top-up to add extra capital.');
+      return;
+    }
+    const amountText = window.prompt('Initialize options monthly capital (INR):', '10000');
     if (!amountText) return;
     const amount = Number(amountText);
     if (!Number.isFinite(amount) || amount <= 0) {
       alert('Enter a valid amount.');
       return;
     }
-    await APIService.setOptionsCapital(amount);
-    const projectCheckData = await APIService.getOptionsProjectCheck().catch(() => null);
-    setOptionsProjectCheck(projectCheckData);
+    try {
+      await APIService.setOptionsCapital(amount);
+      const projectCheckData = await APIService.getOptionsProjectCheck().catch(() => null);
+      setOptionsProjectCheck(projectCheckData);
+    } catch (error) {
+      alert(error.message || 'Failed to initialize options capital.');
+    }
+  };
+
+  const handleTopupOptionsCapital = async () => {
+    const amountText = window.prompt('Add extra options capital (INR):', '1000');
+    if (!amountText) return;
+    const amount = Number(amountText);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert('Enter a valid amount.');
+      return;
+    }
+    try {
+      await APIService.topupOptionsCapital(amount);
+      const projectCheckData = await APIService.getOptionsProjectCheck().catch(() => null);
+      setOptionsProjectCheck(projectCheckData);
+    } catch (error) {
+      alert(error.message || 'Failed to top-up options capital.');
+    }
   };
   
   const handleSetCapital = async (amount) => {
@@ -1732,7 +1776,8 @@ const ETFDashboard = () => {
             />
             <OptionsTradingOverview
               projectCheck={optionsProjectCheck}
-              onSetCapital={handleSetOptionsCapital}
+              onInitCapital={handleInitOptionsCapital}
+              onTopupCapital={handleTopupOptionsCapital}
             />
             <OptionsSignalsCard optionsState={optionsState} />
           </div>

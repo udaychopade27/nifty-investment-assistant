@@ -291,6 +291,37 @@ class OptionsSignalModel(Base):
     # Index already created via Column(..., index=True)
 
 
+class OptionsCapitalMonthModel(Base):
+    """Options monthly capital snapshot (latest effective value per month)"""
+    __tablename__ = "options_capital_month"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(Date, nullable=False, unique=True, index=True)
+    monthly_capital = Column(Numeric(12, 2), nullable=False)
+    initialized = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
+    updated_at = Column(DateTime, nullable=False, default=now_ist_naive)
+
+
+class OptionsCapitalEventModel(Base):
+    """Options capital audit event log (append-only)"""
+    __tablename__ = "options_capital_event"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(Date, nullable=False, index=True)
+    event_type = Column(String(30), nullable=False, index=True)  # init/topup/adjust
+    amount = Column(Numeric(12, 2), nullable=False)
+    rollover_applied = Column(Numeric(12, 2), nullable=False, default=0)
+    previous_capital = Column(Numeric(12, 2), nullable=True)
+    new_capital = Column(Numeric(12, 2), nullable=False)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=now_ist_naive)
+
+    __table_args__ = (
+        Index("ix_options_capital_event_month_created", "month", "created_at"),
+    )
+
+
 class BaseInvestmentPlanModel(Base):
     """Persisted base investment plan per month"""
     __tablename__ = "base_investment_plan"
