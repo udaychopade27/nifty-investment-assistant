@@ -162,7 +162,7 @@ else:
 ## 🔄 Daily Workflow
 
 1. **Market Data Fetch** (9:30 AM NSE)
-2. **Decision Engine Run** (10:00 AM)
+2. **Decision Engine Run** (03:15 PM)
    - Calculate market context
    - Determine dip level
    - Allocate capital to ETFs
@@ -266,7 +266,7 @@ System-wide settings
 
 ## 📅 Scheduler Jobs
 
-### Daily (10:00 AM NSE)
+### Daily (03:15 PM NSE)
 - Run decision engine
 - Send Telegram notification
 

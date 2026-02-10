@@ -89,8 +89,8 @@ calendar_rules:
   market_open_minute: 15
   market_close_hour: 15
   market_close_minute: 30
-  decision_run_hour: 10          # Run decision at 10:00 AM
-  decision_run_minute: 0
+  decision_run_hour: 15          # Run decision at 3:15 PM IST
+  decision_run_minute: 15
   weekend_trading: false
   holiday_trading: false
 

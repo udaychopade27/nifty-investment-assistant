@@ -261,7 +261,7 @@ const TodayDecision = ({ decision, onInvest }) => {
         <div className="text-center py-8">
           <Activity className="h-12 w-12 text-gray-300 mx-auto mb-3" />
           <p className="text-ink-1/80">No decision generated yet</p>
-          <p className="text-sm text-ink-1/60 mt-1">Decision will be generated at 10:00 AM</p>
+          <p className="text-sm text-ink-1/60 mt-1">Decision will be generated at 03:15 PM IST</p>
         </div>
       </Card>
     );

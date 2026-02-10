@@ -331,7 +331,7 @@ etf_assistant/
 ```
 1. Market Opens (9:15 AM IST)
    ↓
-2. Fetch NIFTY Data (10:00 AM)
+2. Fetch NIFTY Data (03:15 PM)
    • Current close
    • Previous close
    • Last 3 days
@@ -527,7 +527,7 @@ tactical_allocation:
 ### Future Enhancements
 
 - ✨ Telegram bot (commands: /today, /invest, /portfolio)
-- ✨ Scheduler (auto-generate daily at 10:00 AM)
+- ✨ Scheduler (auto-generate daily at 03:15 PM)
 - ✨ Portfolio analytics (PnL, allocation drift)
 - ✨ Web dashboard (view decisions, track performance)
 - ✨ Backtesting (test strategies on historical data)

@@ -119,7 +119,7 @@ class ETFScheduler:
     async def daily_decision_job(self):
         """
         Daily job to generate investment decision
-        Runs at 10:00 AM IST on trading days
+        Runs at 03:15 PM IST on trading days
         
         ✅ FIXED: CapitalEngine constructed with all repos
         ✅ FIXED: DecisionEngine is pure (no CapitalEngine)

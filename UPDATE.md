@@ -33,7 +33,7 @@ I've successfully added **ALL 4 requested upgrades** to your ETF Assistant:
 **File:** `app/telegram/bot.py`
 
 ### 4. ⏰ **Scheduler Service**
-- ✅ Daily decision generation (10:00 AM)
+- ✅ Daily decision generation (03:15 PM)
 - ✅ Monthly capital plan (1st of month)
 - ✅ Monthly summary (last day of month)
 - ✅ Test job (every 5 minutes)

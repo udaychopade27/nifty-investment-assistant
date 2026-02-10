@@ -236,7 +236,7 @@ The bot can send **automatic notifications** when:
 ### What It Does
 
 Automatically runs:
-- **Daily Decision** - 10:00 AM (Mon-Fri)
+- **Daily Decision** - 03:15 PM (Mon-Fri)
 - **Monthly Plan** - 1st of month, 9:00 AM
 - **Monthly Summary** - Last day of month, 6:00 PM
 
@@ -304,7 +304,7 @@ docker-compose up telegram_bot
 ### Daily Operation
 
 ```
-10:00 AM → Scheduler generates decision
+03:15 PM → Scheduler generates decision
          ↓
 10:05 AM → Telegram sends notification
          ↓
@@ -419,7 +419,7 @@ python -m app.scheduler.main
 2. ✅ Set monthly capital via API
 3. ✅ Start scheduler
 4. ✅ Test bot commands
-5. ✅ Wait for 10:00 AM for first decision!
+5. ✅ Wait for 03:15 PM for first decision!
 
 ---
 

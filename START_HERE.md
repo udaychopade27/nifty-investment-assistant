@@ -148,7 +148,7 @@ app/infrastructure/
 ## 📊 What Happens Daily
 
 ```
-10:00 AM → System fetches NIFTY data
+03:15 PM → System fetches NIFTY data
         → Calculates market stress
         → Determines dip level
         → Generates investment plan

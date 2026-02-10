@@ -189,7 +189,7 @@ executed_investment (
 
 ### Step 1: Daily Decision
 ```
-10:00 AM → System generates decision
+03:15 PM → System generates decision
          → Telegram sends notification
 ```
 
