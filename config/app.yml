@@ -152,8 +152,10 @@ monitoring:
   sentry_enabled: false
   health_endpoints:
   - /health
+  - /api/v1/health
   - /health/db
   - /health/market
+  - /api/v1/health/market
 security:
   secret_key_min_length: 32
   token_expiry: 86400
