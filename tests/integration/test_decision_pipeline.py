@@ -132,7 +132,9 @@ async def test_decision_pipeline_tactical_only(db_session):
     assert daily_decision.actual_investable_amount > Decimal("0")
 
     symbols = {d.etf_symbol for d in etf_decisions}
-    assert symbols.issubset({"NIFTYBEES", "JUNIORBEES"})
+    # Multi-index tactical ranking can pick MIDCAPETF when its underlying dip is stronger.
+    assert symbols.issubset({"NIFTYBEES", "JUNIORBEES", "MIDCAPETF", "ICICIMOM30", "ICICIVALUE"})
+    assert "JUNIORBEES" in symbols
 
     repo = DailyDecisionRepository(db_session)
     stored = await repo.get_for_date(decision_date)

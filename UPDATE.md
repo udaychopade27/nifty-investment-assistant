@@ -79,7 +79,7 @@ docker-compose up app -d
 curl -X POST http://localhost:8000/api/v1/capital/set \
   -H "Content-Type: application/json" \
   -d '{
-    "monthly_capital": 50000,
+    "monthly_capital": 5000,
     "month": "2026-02"
   }'
 ```

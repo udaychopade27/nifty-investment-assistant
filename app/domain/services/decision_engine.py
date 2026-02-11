@@ -19,7 +19,7 @@ RULES:
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 from app.domain.models import (
     DailyDecision,
@@ -55,7 +55,8 @@ class DecisionEngine:
         base_allocation: AllocationBlueprint,
         tactical_allocation: AllocationBlueprint,
         strategy_version: str,
-        dip_thresholds: dict
+        dip_thresholds: dict,
+        tactical_priority_config: Optional[dict] = None,
     ):
         """
         Initialize decision engine with all dependencies
@@ -70,6 +71,7 @@ class DecisionEngine:
         self.tactical_allocation = tactical_allocation
         self.strategy_version = strategy_version
         self.dip_thresholds = dip_thresholds
+        self.tactical_priority_config = tactical_priority_config or {}
     
     def generate_decision(
         self,
@@ -79,6 +81,7 @@ class DecisionEngine:
         capital_state: CapitalState,  # ✅ ADDED: Capital state passed in
         current_prices: dict[str, Decimal],
         index_changes_by_etf: Optional[dict[str, Decimal]] = None,
+        index_metrics_by_etf: Optional[dict[str, Dict[str, Decimal]]] = None,
         deploy_base_daily: bool = True
     ) -> Tuple[DailyDecision, List[ETFDecision]]:
         """
@@ -131,7 +134,8 @@ class DecisionEngine:
         allocations = self._allocate_capital(
             base_amount,
             tactical_amount,
-            index_changes_by_etf=index_changes_by_etf
+            index_changes_by_etf=index_changes_by_etf,
+            index_metrics_by_etf=index_metrics_by_etf,
         )
         
         # Step 6: Calculate units
@@ -152,7 +156,8 @@ class DecisionEngine:
             base_amount,
             tactical_amount,
             actual_investable,
-            total_unused
+            total_unused,
+            index_changes_by_etf=index_changes_by_etf,
         )
         
         # Step 9: Create DailyDecision
@@ -261,7 +266,8 @@ class DecisionEngine:
         self,
         base_amount: Decimal,
         tactical_amount: Decimal,
-        index_changes_by_etf: Optional[dict[str, Decimal]] = None
+        index_changes_by_etf: Optional[dict[str, Decimal]] = None,
+        index_metrics_by_etf: Optional[dict[str, Dict[str, Decimal]]] = None,
     ) -> List[ETFAllocation]:
         """
         Allocate base and tactical capital to ETFs
@@ -287,7 +293,8 @@ class DecisionEngine:
         if tactical_amount > Decimal('0'):
             tactical_allocs = self._allocate_tactical_filtered(
                 tactical_amount,
-                index_changes_by_etf
+                index_changes_by_etf,
+                index_metrics_by_etf=index_metrics_by_etf,
             )
             all_allocations.extend(tactical_allocs)
         
@@ -299,7 +306,8 @@ class DecisionEngine:
     def _allocate_tactical_filtered(
         self,
         tactical_amount: Decimal,
-        index_changes_by_etf: Optional[dict[str, Decimal]]
+        index_changes_by_etf: Optional[dict[str, Decimal]],
+        index_metrics_by_etf: Optional[dict[str, Dict[str, Decimal]]] = None,
     ) -> List[ETFAllocation]:
         """
         Allocate tactical capital only to ETFs whose underlying index dipped.
@@ -311,6 +319,13 @@ class DecisionEngine:
                 self.tactical_allocation
             )
             return tactical_allocs
+
+        if self.tactical_priority_config.get("enabled"):
+            return self._allocate_tactical_ranked(
+                tactical_amount=tactical_amount,
+                index_changes_by_etf=index_changes_by_etf,
+                index_metrics_by_etf=index_metrics_by_etf or {},
+            )
 
         eligible = []
         for symbol, change in index_changes_by_etf.items():
@@ -352,6 +367,156 @@ class DecisionEngine:
             tactical_blueprint
         )
         return tactical_allocs
+
+    def _allocate_tactical_ranked(
+        self,
+        tactical_amount: Decimal,
+        index_changes_by_etf: dict[str, Decimal],
+        index_metrics_by_etf: dict[str, Dict[str, Decimal]],
+    ) -> List[ETFAllocation]:
+        """
+        Priority-ranked tactical allocation.
+        - Builds an eligible ETF set from dip tiers
+        - Scores each eligible ETF
+        - Allocates tactical budget by rank splits with per-ETF cap
+        """
+        eligible = []
+        for symbol, change in index_changes_by_etf.items():
+            if self._get_dip_tier(change) != "none":
+                eligible.append(symbol)
+        if not eligible:
+            return []
+
+        ranked = self._rank_eligible_etfs(eligible, index_changes_by_etf, index_metrics_by_etf)
+        if not ranked:
+            return []
+
+        rank_cfg = self.tactical_priority_config.get("ranking", {})
+        rank_splits_raw = rank_cfg.get("rank_splits", [50, 30, 20])
+        rank_splits = [Decimal(str(x)) for x in rank_splits_raw if Decimal(str(x)) > Decimal("0")]
+        if not rank_splits:
+            rank_splits = [Decimal("100")]
+        max_ranked_etfs = int(rank_cfg.get("max_ranked_etfs", len(rank_splits)))
+        max_ranked_etfs = max(1, min(max_ranked_etfs, len(ranked)))
+        selected = ranked[:max_ranked_etfs]
+
+        max_cap_pct = Decimal(str(rank_cfg.get("max_etf_cap_pct_of_tactical", 40)))
+        max_cap_pct = max(Decimal("0"), min(max_cap_pct, Decimal("100")))
+        max_per_etf_amount = (tactical_amount * max_cap_pct / Decimal("100")).quantize(Decimal("0.01"))
+        min_allocation_amount = Decimal(str(rank_cfg.get("min_allocation_amount", 0)))
+
+        # Initial allocation by rank splits
+        allocations_by_symbol: Dict[str, Decimal] = {sym: Decimal("0") for sym, _ in selected}
+        split_total = sum(rank_splits[:max_ranked_etfs]) or Decimal("100")
+        for idx, (sym, _) in enumerate(selected):
+            split = rank_splits[idx] if idx < len(rank_splits) else Decimal("0")
+            amt = (tactical_amount * split / split_total).quantize(Decimal("0.01"))
+            if max_per_etf_amount > Decimal("0"):
+                amt = min(amt, max_per_etf_amount)
+            allocations_by_symbol[sym] = amt
+
+        # Redistribute leftover (from capping or fewer splits) by score-headroom.
+        allocated_total = sum(allocations_by_symbol.values())
+        leftover = (tactical_amount - allocated_total).quantize(Decimal("0.01"))
+        if leftover > Decimal("0"):
+            total_score = sum(score for _, score in selected) or Decimal("0")
+            for sym, score in selected:
+                if leftover <= Decimal("0"):
+                    break
+                if max_per_etf_amount > Decimal("0") and allocations_by_symbol[sym] >= max_per_etf_amount:
+                    continue
+                share = (
+                    (leftover * (score / total_score)).quantize(Decimal("0.01"))
+                    if total_score > Decimal("0")
+                    else Decimal("0")
+                )
+                if share <= Decimal("0"):
+                    continue
+                if max_per_etf_amount > Decimal("0"):
+                    headroom = (max_per_etf_amount - allocations_by_symbol[sym]).quantize(Decimal("0.01"))
+                    share = min(share, headroom)
+                allocations_by_symbol[sym] += share
+                leftover -= share
+
+        result: List[ETFAllocation] = []
+        final_total = sum(allocations_by_symbol.values()) or Decimal("1")
+        for sym, amt in allocations_by_symbol.items():
+            if amt < min_allocation_amount:
+                continue
+            pct = (amt / final_total * Decimal("100")).quantize(Decimal("0.01"))
+            result.append(
+                ETFAllocation(
+                    etf_symbol=sym,
+                    allocated_amount=amt.quantize(Decimal("0.01")),
+                    allocation_pct=pct,
+                )
+            )
+        return result
+
+    def _rank_eligible_etfs(
+        self,
+        eligible_symbols: List[str],
+        index_changes_by_etf: dict[str, Decimal],
+        index_metrics_by_etf: dict[str, Dict[str, Decimal]],
+    ) -> List[Tuple[str, Decimal]]:
+        """Score and rank eligible ETFs for tactical deployment."""
+        scoring_cfg = self.tactical_priority_config.get("scoring_weights", {})
+        w_severity = Decimal(str(scoring_cfg.get("severity", 50)))
+        w_persistence = Decimal(str(scoring_cfg.get("persistence", 20)))
+        w_liquidity = Decimal(str(scoring_cfg.get("liquidity", 15)))
+        w_confidence = Decimal(str(scoring_cfg.get("confidence", 15)))
+        w_corr_penalty = Decimal(str(scoring_cfg.get("correlation_penalty", 10)))
+        min_priority_score = Decimal(
+            str(self.tactical_priority_config.get("thresholds", {}).get("min_priority_score", 0))
+        )
+
+        # Tactical blueprint weight acts as static liquidity / tradability prior.
+        tactical_weights = {
+            sym: Decimal(str(pct)) / Decimal("100")
+            for sym, pct in self.tactical_allocation.allocations.items()
+        }
+
+        ranked_raw: List[Tuple[str, Decimal]] = []
+        for sym in eligible_symbols:
+            daily_change = index_changes_by_etf.get(sym, Decimal("0"))
+            metrics = index_metrics_by_etf.get(sym, {})
+            three_day_change = Decimal(str(metrics.get("three_day_change_pct", Decimal("0"))))
+            data_quality = Decimal(str(metrics.get("data_quality", Decimal("1"))))
+
+            severity_signal = max(Decimal("0"), -daily_change) / Decimal("5")  # normalize ~0..1
+            persistence_signal = max(Decimal("0"), -three_day_change) / Decimal("8")
+            liquidity_signal = tactical_weights.get(sym, Decimal("0"))
+            confidence_signal = min(Decimal("1"), max(Decimal("0"), data_quality))
+
+            score = (
+                w_severity * severity_signal
+                + w_persistence * persistence_signal
+                + w_liquidity * liquidity_signal
+                + w_confidence * confidence_signal
+            )
+            if score >= min_priority_score:
+                ranked_raw.append((sym, score.quantize(Decimal("0.0001"))))
+
+        ranked_raw.sort(key=lambda x: x[1], reverse=True)
+        if not ranked_raw:
+            return []
+
+        # Apply simple correlation penalty by configured ETF groups.
+        groups = self.tactical_priority_config.get("correlations", {}).get("groups", [])
+        selected_with_penalty: List[Tuple[str, Decimal]] = []
+        picked: List[str] = []
+        for sym, raw_score in ranked_raw:
+            penalty_count = 0
+            for group in groups:
+                if sym in group:
+                    penalty_count += sum(1 for p in picked if p in group)
+            penalized = raw_score - (w_corr_penalty * Decimal("0.25") * Decimal(penalty_count))
+            if penalized > Decimal("0"):
+                selected_with_penalty.append((sym, penalized.quantize(Decimal("0.0001"))))
+                picked.append(sym)
+
+        selected_with_penalty.sort(key=lambda x: x[1], reverse=True)
+        return selected_with_penalty
 
     def _determine_decision_type_from_index_changes(
         self,
@@ -449,7 +614,8 @@ class DecisionEngine:
         base_amount: Decimal,
         tactical_amount: Decimal,
         actual_investable: Decimal,
-        unused: Decimal
+        unused: Decimal,
+        index_changes_by_etf: Optional[dict[str, Decimal]] = None,
     ) -> str:
         """
         Generate human-readable explanation
@@ -486,6 +652,15 @@ class DecisionEngine:
         # Capital breakdown
         if base_amount > Decimal('0') or tactical_amount > Decimal('0'):
             parts.append(f"Base: ₹{base_amount}, Tactical: ₹{tactical_amount}")
+
+        if index_changes_by_etf:
+            dipped = sorted(
+                [(sym, chg) for sym, chg in index_changes_by_etf.items() if chg is not None and chg < Decimal("0")],
+                key=lambda x: x[1],
+            )
+            if dipped:
+                top = ", ".join([f"{sym}:{chg}%" for sym, chg in dipped[:3]])
+                parts.append(f"Index dips: {top}")
         
         # Actual vs suggested
         suggested = base_amount + tactical_amount

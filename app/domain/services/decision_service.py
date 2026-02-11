@@ -157,12 +157,42 @@ class DecisionService:
         
         # Step 6: Fetch underlying index changes (for tactical dip logic)
         index_changes_by_etf: dict[str, Decimal] = {}
+        index_metrics_by_etf: dict[str, dict[str, Decimal]] = {}
         for symbol, index_name in self.etf_index_map.items():
             if not index_name:
                 continue
             change = await self.market_data_provider.get_index_daily_change(index_name, decision_date)
             if change is not None:
                 index_changes_by_etf[symbol] = change
+                index_metrics_by_etf[symbol] = {
+                    "daily_change_pct": change,
+                    "data_quality": Decimal("1"),
+                }
+            else:
+                index_metrics_by_etf[symbol] = {"data_quality": Decimal("0")}
+
+            # Optional enrichments: 3-day trend and 20D distance from average.
+            try:
+                closes_20 = await self.market_data_provider.get_last_n_closes(
+                    index_name,
+                    n=20,
+                    end_date=decision_date,
+                )
+                if closes_20:
+                    latest = closes_20[-1]
+                    avg_20 = (sum(closes_20) / Decimal(len(closes_20)))
+                    if avg_20 > Decimal("0"):
+                        ma_dist = ((latest - avg_20) / avg_20 * Decimal("100")).quantize(Decimal("0.01"))
+                        index_metrics_by_etf[symbol]["ma20_distance_pct"] = ma_dist
+                if len(closes_20) >= 3:
+                    start_3 = closes_20[-3]
+                    end_3 = closes_20[-1]
+                    if start_3 > Decimal("0"):
+                        three_day = ((end_3 - start_3) / start_3 * Decimal("100")).quantize(Decimal("0.01"))
+                        index_metrics_by_etf[symbol]["three_day_change_pct"] = three_day
+            except Exception:
+                # Non-fatal: provider may not support this index symbol path consistently.
+                pass
 
         # Step 7: ✅ Generate decision (passing capital_state)
         logger.info("🎯 Generating decision...")
@@ -173,6 +203,7 @@ class DecisionService:
             capital_state=capital_state,  # ✅ Passed in
             current_prices=current_prices,
             index_changes_by_etf=index_changes_by_etf,
+            index_metrics_by_etf=index_metrics_by_etf,
             deploy_base_daily=False
         )
         

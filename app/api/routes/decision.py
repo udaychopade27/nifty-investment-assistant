@@ -379,7 +379,8 @@ async def generate_decision(
             base_allocation=config_engine.base_allocation,
             tactical_allocation=config_engine.tactical_allocation,
             strategy_version=config_engine.strategy_version,
-            dip_thresholds=config_engine.get_rule('dip_thresholds')
+            dip_thresholds=config_engine.get_rule('dip_thresholds'),
+            tactical_priority_config=config_engine.get_rule('tactical_priority')
         )
         
         # Fetch market data

@@ -198,7 +198,8 @@ class ETFScheduler:
                     base_allocation=self.config_engine.base_allocation,
                     tactical_allocation=self.config_engine.tactical_allocation,
                     strategy_version=self.config_engine.strategy_version,
-                    dip_thresholds=self.config_engine.get_rule('dip_thresholds')
+                    dip_thresholds=self.config_engine.get_rule('dip_thresholds'),
+                    tactical_priority_config=self.config_engine.get_rule('tactical_priority')
                 )
                 
                 logger.info("✅ DecisionEngine initialized (pure)")

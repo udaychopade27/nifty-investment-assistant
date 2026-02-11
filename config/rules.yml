@@ -35,6 +35,27 @@ dip_thresholds:
     max_change: -3.5             # Full dip: below -3.5%
     tactical_deployment: 100.0   # Deploy 100% tactical
 
+# Tactical multi-index priority allocator (production mode)
+tactical_priority:
+  enabled: true
+  ranking:
+    rank_splits: [50, 30, 20]     # Rank1/Rank2/Rank3 split of tactical budget
+    max_ranked_etfs: 3
+    max_etf_cap_pct_of_tactical: 40
+    min_allocation_amount: 50
+  thresholds:
+    min_priority_score: 5
+  scoring_weights:
+    severity: 50
+    persistence: 20
+    liquidity: 15
+    confidence: 15
+    correlation_penalty: 10
+  correlations:
+    groups:
+      - ["NIFTYBEES", "JUNIORBEES", "MIDCAPETF"]
+      - ["ICICIVALUE", "ICICIMOM30"]
+
 # Multi-Day Trend Rules
 trend_rules:
   three_day_threshold: 2.5       # 3-day fall ≥ 2.5% = MEDIUM override
