@@ -23,6 +23,7 @@ from app.infrastructure.db.repositories.investment_repository import ExecutedInv
 from app.infrastructure.db.repositories.extra_capital_repository import ExtraCapitalRepository
 from app.infrastructure.db.models import MonthlyConfigModel
 from sqlalchemy import select
+from app.utils.time import to_ist_iso_db
 
 router = APIRouter()
 
@@ -241,7 +242,7 @@ async def set_monthly_capital(
         trading_days=config.trading_days,
         daily_tranche=float(config.daily_tranche),
         strategy_version=config.strategy_version,
-        created_at=config.created_at.isoformat(),
+        created_at=to_ist_iso_db(config.created_at),
         month_source=month_source,
         carry_forward_applied=request.apply_carry_forward,
         carry_forward_base=float(carry_forward_base) if carry_forward_base > 0 else 0.0,
@@ -288,7 +289,7 @@ async def get_current_capital(db: AsyncSession = Depends(get_db)):
         trading_days=config.trading_days,
         daily_tranche=float(config.daily_tranche),
         strategy_version=config.strategy_version,
-        created_at=config.created_at.isoformat(),
+        created_at=to_ist_iso_db(config.created_at),
         month_source="auto_current",
         carry_forward_applied=bool(carry_log),
         carry_forward_base=float(carry_log.base_carried_forward) if carry_log else None,
@@ -421,7 +422,7 @@ async def get_capital_for_month(
         trading_days=config.trading_days,
         daily_tranche=float(config.daily_tranche),
         strategy_version=config.strategy_version,
-        created_at=config.created_at.isoformat(),
+        created_at=to_ist_iso_db(config.created_at),
         month_source="explicit",
         carry_forward_applied=bool(carry_log),
         carry_forward_base=float(carry_log.base_carried_forward) if carry_log else None,
@@ -462,7 +463,7 @@ async def get_carry_forward_for_month(
         base_carried_forward=float(log.base_carried_forward),
         tactical_carried_forward=float(log.tactical_carried_forward),
         total_monthly_capital=float(log.total_monthly_capital),
-        created_at=log.created_at.isoformat()
+        created_at=to_ist_iso_db(log.created_at)
     )
 
 

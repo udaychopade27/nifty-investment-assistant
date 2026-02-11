@@ -10,7 +10,7 @@ from datetime import date
 from typing import Optional, Callable, Awaitable
 
 from app.infrastructure.db.repositories.api_token_repository import ApiTokenRepository
-from app.utils.time import now_ist_naive
+from app.utils.time import now_ist_naive, to_ist_iso_db
 from app.infrastructure.db.database import async_session_factory
 
 
@@ -72,7 +72,7 @@ class ApiTokenService:
         return TokenStatus(
             provider=self.provider,
             has_token=True,
-            last_updated=record.updated_at.isoformat(),
+            last_updated=to_ist_iso_db(record.updated_at),
             needs_refresh=needs_refresh,
             masked_token=_mask_token(record.token),
         )

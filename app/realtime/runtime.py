@@ -20,7 +20,7 @@ from app.infrastructure.market_data.streams.multiplexer import MarketDataMultipl
 from app.infrastructure.market_data.options.subscription_manager import OptionsSubscriptionManager
 from app.realtime.signal_queue import SignalQueue, SignalWorker, SignalEvent
 from app.utils.notifications import send_tiered_telegram_message
-from app.utils.time import now_ist_naive
+from app.utils.time import now_ist_naive, to_ist_iso
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +284,7 @@ class RealtimeRuntime:
             "symbol": symbol,
             "instrument_key": instrument_key,
             "price": float(price),
-            "ts": ts.isoformat(),
+            "ts": to_ist_iso(ts),
         }
         self._last_tick_at = datetime.now(tz=timezone.utc)
         self._stale_alert_sent = False
@@ -346,7 +346,7 @@ class RealtimeRuntime:
         payload = {
             "symbol": symbol,
             "price": float(price),
-            "ts": ts.isoformat(),
+            "ts": to_ist_iso(ts),
         }
         ttl = int(self._get_config().get("redis", {}).get("tick_ttl_seconds", 120))
         await self._redis_cache.set_json(f"tick:{symbol}", payload, ttl)
@@ -369,8 +369,8 @@ class RealtimeRuntime:
             status["last_quotes"] = self._quote_store.get_status()
         status["tick_count"] = self._tick_count
         status["last_tick"] = self._last_tick
-        status["last_tick_at"] = self._last_tick_at.isoformat() if self._last_tick_at else None
-        status["last_status_at"] = self._last_status_at.isoformat() if self._last_status_at else None
+        status["last_tick_at"] = to_ist_iso(self._last_tick_at) if self._last_tick_at else None
+        status["last_status_at"] = to_ist_iso(self._last_status_at) if self._last_status_at else None
         status["subscribe_payload"] = self._last_subscribe_payload
         status["instrument_keys"] = list(self._last_instrument_keys)
         now = datetime.now(tz=timezone.utc)
@@ -395,7 +395,7 @@ class RealtimeRuntime:
         if self._signal_queue:
             status["signal_queue_size"] = self._signal_queue.size()
             status["recent_signals"] = list(self._recent_signals)
-        status["ts"] = datetime.now(tz=timezone.utc).isoformat()
+        status["ts"] = to_ist_iso(datetime.now(tz=timezone.utc))
         return status
 
     def subscribe_ticks(self, handler) -> None:
@@ -422,7 +422,7 @@ class RealtimeRuntime:
         signal = {
             "event_type": event.event_type,
             "symbol": event.symbol,
-            "ts": event.ts.isoformat(),
+            "ts": to_ist_iso(event.ts),
         }
         if open_price and close_price:
             change_pct = ((close_price - open_price) / open_price) * 100

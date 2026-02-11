@@ -28,7 +28,7 @@ from app.infrastructure.db.repositories.base_plan_repository import BaseInvestme
 from app.infrastructure.db.models import ExecutedInvestmentModel
 from app.utils.notifications import send_tiered_telegram_message
 from app.config import settings
-from app.utils.time import now_ist_naive
+from app.utils.time import now_ist_naive, to_ist_iso_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -170,7 +170,7 @@ async def execute_base_investment(
             units=existing_investment.units,
             executed_price=float(existing_investment.executed_price),
             total_amount=float(existing_investment.total_amount),
-            executed_at=existing_investment.executed_at.isoformat(),
+            executed_at=to_ist_iso_db(existing_investment.executed_at),
             decision_linked=False,
         )
 
@@ -236,7 +236,7 @@ async def execute_base_investment(
         units=investment.units,
         executed_price=float(investment.executed_price),
         total_amount=float(investment.total_amount),
-        executed_at=investment.executed_at.isoformat(),
+        executed_at=to_ist_iso_db(investment.executed_at),
         decision_linked=False,
     )
 
@@ -324,7 +324,7 @@ async def execute_tactical_investment(
             units=existing_investment.units,
             executed_price=float(existing_investment.executed_price),
             total_amount=float(existing_investment.total_amount),
-            executed_at=existing_investment.executed_at.isoformat(),
+            executed_at=to_ist_iso_db(existing_investment.executed_at),
             decision_linked=True,
         )
 
@@ -393,7 +393,7 @@ async def execute_tactical_investment(
         units=investment.units,
         executed_price=float(investment.executed_price),
         total_amount=float(investment.total_amount),
-        executed_at=investment.executed_at.isoformat(),
+        executed_at=to_ist_iso_db(investment.executed_at),
         decision_linked=True,
     )
 

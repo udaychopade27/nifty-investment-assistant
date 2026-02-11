@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.db.models import OptionsCapitalMonthModel, OptionsCapitalEventModel
-from app.utils.time import now_ist_naive
+from app.utils.time import now_ist_naive, to_ist_iso_db
 
 
 class OptionsCapitalRepository:
@@ -78,8 +78,8 @@ class OptionsCapitalRepository:
             "month": model.month.isoformat(),
             "monthly_capital": float(model.monthly_capital),
             "initialized": bool(model.initialized),
-            "created_at": model.created_at.isoformat() if model.created_at else None,
-            "updated_at": model.updated_at.isoformat() if model.updated_at else None,
+            "created_at": to_ist_iso_db(model.created_at) if model.created_at else None,
+            "updated_at": to_ist_iso_db(model.updated_at) if model.updated_at else None,
         }
 
     async def get_events(self, month: Optional[date_type] = None, limit: int = 200) -> List[Dict[str, Any]]:
@@ -99,7 +99,7 @@ class OptionsCapitalRepository:
                 "previous_capital": float(r.previous_capital) if r.previous_capital is not None else None,
                 "new_capital": float(r.new_capital),
                 "payload": r.payload,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "created_at": to_ist_iso_db(r.created_at) if r.created_at else None,
             }
             for r in rows
         ]

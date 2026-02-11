@@ -22,7 +22,7 @@ from app.infrastructure.market_data.yfinance_provider import YFinanceProvider
 from app.infrastructure.market_data.upstox_provider import UpstoxProvider
 from app.domain.services.config_engine import ConfigEngine
 from app.config import settings
-from app.utils.time import now_ist_naive
+from app.utils.time import now_ist_naive, to_ist_iso_db
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 
 logger = logging.getLogger(__name__)
@@ -277,7 +277,7 @@ async def get_portfolio_summary(request: Request, db: AsyncSession = Depends(get
             pnl_percentage=round(total_pnl_pct, 2),
             holdings=holdings,
             prices_missing=prices_missing,
-            last_updated=now_ist_naive().isoformat()
+            last_updated=to_ist_iso_db(now_ist_naive())
         )
         
     except Exception as e:
@@ -364,7 +364,7 @@ async def get_portfolio_pnl(request: Request, db: AsyncSession = Depends(get_db)
             pnl_percentage=round(total_pnl_pct, 2),
             realized_pnl=realized_pnl_total,
             prices_missing=prices_missing,
-            last_updated=now_ist_naive().isoformat(),
+            last_updated=to_ist_iso_db(now_ist_naive()),
             holdings=holdings
         )
     except Exception as e:

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.infrastructure.db.models import OptionsSignalModel
-from app.utils.time import now_ist_naive
+from app.utils.time import now_ist_naive, to_ist_iso_db
 
 
 class OptionsSignalRepository:
@@ -62,7 +62,7 @@ class OptionsSignalRepository:
             {
                 "id": r.id,
                 "date": r.date.isoformat(),
-                "signal_ts": r.signal_ts.isoformat(),
+                "signal_ts": to_ist_iso_db(r.signal_ts),
                 "underlying": r.underlying,
                 "signal": r.signal,
                 "entry": float(r.entry),

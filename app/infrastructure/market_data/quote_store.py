@@ -9,6 +9,7 @@ from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Callable, Deque, Dict, List, Optional
+from app.utils.time import to_ist_iso
 
 
 @dataclass
@@ -109,7 +110,7 @@ class QuoteStore:
             age = (now - quote.ts).total_seconds()
             status[symbol] = {
                 "price": float(quote.price),
-                "ts": quote.ts.isoformat(),
+                "ts": to_ist_iso(quote.ts),
                 "age_seconds": age,
             }
         return status
@@ -117,7 +118,7 @@ class QuoteStore:
     @staticmethod
     def bar_to_dict(bar: MinuteBar) -> Dict[str, object]:
         data = asdict(bar)
-        data["start"] = bar.start.isoformat()
+        data["start"] = to_ist_iso(bar.start)
         data["open"] = float(bar.open)
         data["high"] = float(bar.high)
         data["low"] = float(bar.low)

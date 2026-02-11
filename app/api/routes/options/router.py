@@ -13,13 +13,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.infrastructure.repositories.options.signal_repository import OptionsSignalRepository
 from app.infrastructure.repositories.options.capital_repository import OptionsCapitalRepository
 from app.infrastructure.market_data.options.chain_resolver import OptionsChainResolver
-from app.utils.time import IST
+from app.utils.time import IST, to_ist_iso_db
 from app.domain.services.api_token_service import ApiTokenService
 from app.config import settings
 import httpx
 from app.utils.notifications import send_tiered_telegram_message
 
 router = APIRouter()
+
+
+def _format_ist_ts(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return to_ist_iso_db(value)
+    if isinstance(value, str):
+        try:
+            return to_ist_iso_db(datetime.fromisoformat(value))
+        except Exception:
+            return value
+    return value
 
 
 class OptionsCapitalUpdateRequest(BaseModel):
@@ -518,7 +531,7 @@ async def options_capital_current(
             "monthly_capital": float(row.get("monthly_capital") or 0.0),
             "initialized": bool(row.get("initialized", False)),
             "source": "database",
-            "updated_at": row.get("updated_at"),
+            "updated_at": _format_ist_ts(row.get("updated_at")),
         }
 
     fallback = None

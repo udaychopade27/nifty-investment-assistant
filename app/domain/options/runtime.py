@@ -41,7 +41,7 @@ import asyncio
 from app.infrastructure.db.database import async_session_factory
 from app.infrastructure.repositories.options.signal_repository import OptionsSignalRepository
 from app.infrastructure.repositories.options.capital_repository import OptionsCapitalRepository
-from app.utils.time import IST
+from app.utils.time import IST, to_ist_iso
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +271,7 @@ class OptionsRuntime:
                 "bid": bid,
                 "ask": ask,
                 "volume": event.get("volume"),
-                "ts": ts.isoformat() if isinstance(ts, datetime) else str(ts),
+                "ts": to_ist_iso(ts) if isinstance(ts, datetime) else str(ts),
             }
             self._update_paper_positions(key, price_value, ts)
             if oi is not None:
@@ -332,7 +332,7 @@ class OptionsRuntime:
             current = builder.current()
             if current:
                 self._market_state.current_candles[symbol] = {
-                    "ts": current.ts.isoformat(),
+                    "ts": to_ist_iso(current.ts),
                     "open": current.open,
                     "high": current.high,
                     "low": current.low,
@@ -343,7 +343,7 @@ class OptionsRuntime:
             "symbol": symbol,
             "instrument_key": key,
             "price": price_value,
-            "ts": ts.isoformat() if isinstance(ts, datetime) else str(ts),
+            "ts": to_ist_iso(ts) if isinstance(ts, datetime) else str(ts),
         }
         self._market_state.risk = dict(self._risk_state)
         self._refresh_paper_state()
@@ -422,7 +422,7 @@ class OptionsRuntime:
             return
         max_spread = float(self._data_quality_cfg.get("max_spread_pct_circuit", 1.2))
         if spread_pct > max_spread:
-            self._mark_data_anomaly(symbol, "spread_circuit_breaker", {"key": key, "spread_pct": round(spread_pct, 3), "max": max_spread, "ltp": ltp, "ts": ts.isoformat() if isinstance(ts, datetime) else str(ts)})
+            self._mark_data_anomaly(symbol, "spread_circuit_breaker", {"key": key, "spread_pct": round(spread_pct, 3), "max": max_spread, "ltp": ltp, "ts": to_ist_iso(ts) if isinstance(ts, datetime) else str(ts)})
 
     def get_status(self) -> Dict[str, Any]:
         return {
@@ -480,7 +480,7 @@ class OptionsRuntime:
         flat_threshold = float(self._config_engine.get_options_setting("options", "risk", "flat_atr_threshold"))
         regime = "Trending" if atr is not None and float(atr) >= flat_threshold else "Range"
         indicator = {
-            "ts": history[-1].ts.isoformat(),
+            "ts": to_ist_iso(history[-1].ts),
             "open": history[-1].open,
             "high": history[-1].high,
             "low": history[-1].low,
@@ -578,7 +578,7 @@ class OptionsRuntime:
         window = int(self._strict_cfg.get("vwap_5m_window", 20))
         close_5m = history_5m[-1].close
         vwap_5m = vwap(closes[-window:], volumes[-window:])
-        return close_5m, vwap_5m, history_5m[-1].ts.isoformat()
+        return close_5m, vwap_5m, to_ist_iso(history_5m[-1].ts)
 
     def _compute_oi_change(self, symbol: str) -> Optional[float]:
         # Aggregate change across available option instruments for the underlying.
@@ -766,7 +766,7 @@ class OptionsRuntime:
         try:
             ts = datetime.fromisoformat(str(indicator.get("ts")))
         except Exception:
-            ts = datetime.utcnow()
+            ts = datetime.now(IST)
         if in_no_trade_window(ts, self._config_engine.get_options_setting("options", "risk", "no_trade_windows")):
             reasons.append("time_window_block")
         if force_direction is None and bool(signal_cfg.get("require_atr", True)) and indicator.get("atr") is None:
@@ -991,7 +991,7 @@ class OptionsRuntime:
         try:
             ts = datetime.fromisoformat(str(indicator.get("ts")))
         except Exception:
-            ts = datetime.utcnow()
+            ts = datetime.now(IST)
         if force_direction is None and not self._is_market_open_for_signal(ts):
             self._last_no_trade_reasons[symbol] = {
                 "symbol": symbol,
@@ -1033,7 +1033,10 @@ class OptionsRuntime:
 
         # Cooldown per symbol+signal (skip if forced)
         last_ts = self._last_signal_ts.get(f"{symbol}:{signal_type}")
-        if force_direction is None and last_ts and (datetime.utcnow() - last_ts).total_seconds() < cooldown_minutes * 60:
+        now_ist = datetime.now(IST)
+        if isinstance(last_ts, datetime) and last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=IST)
+        if force_direction is None and last_ts and (now_ist - last_ts).total_seconds() < cooldown_minutes * 60:
             self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["cooldown_active"]}
             return None
         # We are long options in both cases (CE or PE), so
@@ -1165,7 +1168,7 @@ class OptionsRuntime:
             "_ml_features": features,
         }
         self._metrics["signals_generated"] = float(self._metrics.get("signals_generated", 0)) + 1
-        self._last_signal_ts[f"{symbol}:{signal_type}"] = datetime.utcnow()
+        self._last_signal_ts[f"{symbol}:{signal_type}"] = datetime.now(IST)
         self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": []}
         return signal
 
@@ -1536,7 +1539,7 @@ class OptionsRuntime:
             return
         pos["status"] = "closed"
         pos["exit_price"] = round(exit_price, 2)
-        pos["exit_ts"] = ts.isoformat()
+        pos["exit_ts"] = to_ist_iso(ts)
         gross_pnl = round((exit_price - pos["entry"]) * pos["qty"], 2)
         costs = self._compute_trade_costs(pos["entry"], exit_price, int(pos["qty"]))
         net_pnl = round(gross_pnl - costs, 2)
@@ -1587,7 +1590,7 @@ class OptionsRuntime:
         cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
         sample_path = Path(str(cfg.get("samples_path", "data/options_paper_samples.jsonl")))
         payload = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": to_ist_iso(datetime.now(IST)),
             "won": bool(won),
             "pnl": round(float(pnl), 2),
             "features": features,
@@ -1707,7 +1710,7 @@ class OptionsRuntime:
             if close is None:
                 return None
             indicator = {
-                "ts": current.get("ts") if isinstance(current, dict) else datetime.utcnow().isoformat(),
+                "ts": current.get("ts") if isinstance(current, dict) else to_ist_iso(datetime.now(IST)),
                 "open": close,
                 "high": close,
                 "low": close,
@@ -1737,7 +1740,7 @@ class OptionsRuntime:
             if close is None:
                 return {"signal": None, "reason": "no_indicator_or_spot"}
             indicator = {
-                "ts": current.get("ts") if isinstance(current, dict) else datetime.utcnow().isoformat(),
+                "ts": current.get("ts") if isinstance(current, dict) else to_ist_iso(datetime.now(IST)),
                 "open": close,
                 "high": close,
                 "low": close,
@@ -2511,7 +2514,7 @@ class OptionsRuntime:
                 "risk_state": dict(self._risk_state),
                 "paper_trades": list(self._paper_trades),
                 "paper_positions": dict(self._paper_positions),
-                "last_signal_ts": {k: v.isoformat() for k, v in self._last_signal_ts.items()},
+                "last_signal_ts": {k: to_ist_iso(v, naive_assumed_tz=IST) for k, v in self._last_signal_ts.items()},
                 "processed_signal_keys": dict(self._processed_signal_keys),
                 "metrics": dict(self._metrics),
                 "ml_drift_state": dict(self._ml_drift_state),
