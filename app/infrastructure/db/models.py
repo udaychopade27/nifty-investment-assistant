@@ -284,8 +284,7 @@ class OptionsSignalModel(Base):
     created_at = Column(DateTime, nullable=False, default=now_ist_naive)
 
     __table_args__ = (
-        Index("ix_options_signal_date", "date"),
-        Index("ix_options_signal_underlying", "underlying", "signal_ts"),
+        Index("ix_options_signal_underlying_ts", "underlying", "signal_ts"),
     )
 
     # Index already created via Column(..., index=True)

@@ -96,6 +96,7 @@ class OptionsRuntime:
         self._ops_cfg: Dict[str, Any] = {}
         self._promotion_cfg: Dict[str, Any] = {}
         self._ml_pipeline_cfg: Dict[str, Any] = {}
+        self._strike_selection_cfg: Dict[str, Any] = {}
         self._runtime_state_file: Path = Path("data/options_runtime_state.json")
         self._oi_snapshot_file: Path = Path("data/options_oi_snapshots.jsonl")
         self._audit_log: deque = deque(maxlen=500)
@@ -159,6 +160,7 @@ class OptionsRuntime:
         self._ops_cfg = options_cfg.get("operations", {}) or {}
         self._promotion_cfg = options_cfg.get("promotion_gates", {}) or {}
         self._ml_pipeline_cfg = options_cfg.get("ml_pipeline", {}) or {}
+        self._strike_selection_cfg = options_cfg.get("strike_selection", {}) or {}
         self._runtime_state_file = Path(str(self._ops_cfg.get("runtime_state_file", "data/options_runtime_state.json")))
         self._oi_snapshot_file = Path(str(self._ops_cfg.get("oi_snapshot_file", "data/options_oi_snapshots.jsonl")))
         md_cfg = options_cfg.get("market_data", {}) or {}
@@ -594,16 +596,15 @@ class OptionsRuntime:
         return sum(changes)
 
     def _compute_oi_side_change(self, symbol: str, side: str) -> Optional[float]:
-        changes = []
-        for meta in self._option_instruments.values():
-            if meta.get("underlying") == symbol and meta.get("side") == side:
-                key = meta.get("key")
-                history = self._oi_history.get(key)
-                if history and len(history) == 2:
-                    changes.append(history[-1] - history[-2])
-        if not changes:
+        selected = self._select_option_candidate(symbol, side, prefer_atm=True)
+        if not selected:
             return None
-        return sum(changes)
+        meta, _ = selected
+        key = meta.get("key")
+        history = self._oi_history.get(key)
+        if not history or len(history) < 2:
+            return None
+        return float(history[-1] - history[-2])
 
     def _compute_iv_change(self, symbol: str) -> Optional[float]:
         changes = []
@@ -624,88 +625,244 @@ class OptionsRuntime:
             return None
         return history[-1] - history[-2]
 
-    def _get_delta_side(self, symbol: str, side: str) -> Optional[float]:
-        for meta in self._option_instruments.values():
-            if meta.get("underlying") == symbol and meta.get("side") == side:
-                key = meta.get("key")
-                if key and key in self._market_state.options:
-                    value = self._market_state.options[key].get("delta")
-                    try:
-                        if value is None:
-                            return None
-                        return float(value)
-                    except Exception:
-                        return None
-        return None
-
-    def _get_spread_pct(self, symbol: str, side: str) -> Optional[float]:
-        for meta in self._option_instruments.values():
-            if meta.get("underlying") == symbol and meta.get("side") == side:
-                key = meta.get("key")
-                if key and key in self._market_state.options:
-                    row = self._market_state.options[key]
-                    bid = row.get("bid")
-                    ask = row.get("ask")
-                    if bid is None or ask is None:
-                        return None
-                    try:
-                        bid_f = float(bid)
-                        ask_f = float(ask)
-                        mid = (bid_f + ask_f) / 2.0
-                        if mid <= 0:
-                            return None
-                        return ((ask_f - bid_f) / mid) * 100.0
-                    except Exception:
-                        return None
-        return None
-
-    def _get_option_price(self, symbol: str, side: str) -> Optional[float]:
+    def _atm_strike_for_symbol(self, symbol: str) -> Optional[float]:
         spot = self._market_state.spot.get(symbol)
         if spot is None:
             return None
-        signal_cfg = self._strategy_cfg.get("signal", {}) or {}
-        strike_pref = str(signal_cfg.get("strike_preference", "ATM")).upper()
-        # Pick nearest strike from configured instruments
-        candidates = []
+        step = None
         for meta in self._option_instruments.values():
-            if meta.get("underlying") == symbol and meta.get("side") == side:
-                key = meta.get("key")
-                if key and key in self._market_state.options:
-                    ltp = self._market_state.options[key].get("ltp")
-                    strike = meta.get("resolved_strike", meta.get("strike"))
-                    if ltp is not None and strike is not None:
-                        try:
-                            strike_val = float(strike)
-                        except Exception:
-                            continue
-                        moneyness = abs(strike_val - float(spot))
-                        # Preference score: lower is better.
-                        pref_score = 1.0
-                        if strike_pref in ("ATM", "AUTO"):
-                            pref_score = moneyness
-                        elif strike_pref == "ITM":
-                            if (side == "CE" and strike_val <= float(spot)) or (side == "PE" and strike_val >= float(spot)):
-                                pref_score = moneyness
-                            else:
-                                pref_score = 1e9 + moneyness
-                        elif strike_pref == "OTM":
-                            if (side == "CE" and strike_val > float(spot)) or (side == "PE" and strike_val < float(spot)):
-                                pref_score = moneyness
-                            else:
-                                pref_score = 1e9 + moneyness
-                        candidates.append((pref_score, ltp, key))
+            if meta.get("underlying") == symbol:
+                try:
+                    step = int(meta.get("step") or 0)
+                except Exception:
+                    step = 0
+                if step > 0:
+                    break
+        if not step or step <= 0:
+            return None
+        return float(round(float(spot) / step) * step)
+
+    def _spread_pct_from_row(self, row: Dict[str, Any]) -> Optional[float]:
+        bid = row.get("bid")
+        ask = row.get("ask")
+        if bid is None or ask is None:
+            return None
+        try:
+            bid_f = float(bid)
+            ask_f = float(ask)
+            mid = (bid_f + ask_f) / 2.0
+            if mid <= 0:
+                return None
+            return ((ask_f - bid_f) / mid) * 100.0
+        except Exception:
+            return None
+
+    def _strike_score_details(self, symbol: str, side: str, meta: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, float]:
+        scoring = (self._strike_selection_cfg.get("scoring") or {}) if isinstance(self._strike_selection_cfg, dict) else {}
+        liquidity_w = float(scoring.get("liquidity_weight", 0.35))
+        oi_w = float(scoring.get("oi_change_weight", 0.25))
+        iv_w = float(scoring.get("iv_rank_weight", 0.15))
+        delta_w = float(scoring.get("delta_proximity_weight", 0.20))
+        spread_w = float(scoring.get("spread_penalty", 0.20))
+        target_delta = float(scoring.get("target_delta_abs", 0.45))
+
+        key = meta.get("key")
+        ltp = float(row.get("ltp") or 0.0)
+        volume = float(row.get("volume") or 0.0)
+        oi = float(row.get("oi") or 0.0)
+        delta = row.get("delta")
+        iv = row.get("iv")
+
+        liquidity_score = 0.0
+        try:
+            liquidity_score = min(1.0, (volume / 1_000_000.0)) * 0.7 + min(1.0, (oi / 1_000_000.0)) * 0.3
+        except Exception:
+            liquidity_score = 0.0
+
+        oi_score = 0.0
+        history = self._oi_history.get(key)
+        if history and len(history) == 2:
+            change = float(history[-1] - history[-2])
+            # Positive trend in OI gets positive normalization.
+            oi_score = max(0.0, min(1.0, 0.5 + (change / 100000.0)))
+
+        iv_score = 0.0
+        iv_hist = self._iv_history.get(key)
+        if iv_hist and len(iv_hist) == 2:
+            iv_change = float(iv_hist[-1] - iv_hist[-2])
+            iv_score = max(0.0, min(1.0, 0.5 + (iv_change / 0.02)))
+        elif iv is not None:
+            try:
+                iv_val = float(iv)
+                iv_score = max(0.0, min(1.0, iv_val))
+            except Exception:
+                iv_score = 0.0
+
+        delta_score = 0.0
+        try:
+            if delta is not None:
+                abs_delta = abs(float(delta))
+                delta_score = max(0.0, 1.0 - abs(abs_delta - target_delta) / max(target_delta, 0.01))
+        except Exception:
+            delta_score = 0.0
+
+        spread_pct = self._spread_pct_from_row(row)
+        spread_penalty = 0.0
+        if spread_pct is not None:
+            spread_penalty = min(1.0, max(0.0, spread_pct / 2.0))
+
+        # small moneyness preference from configured strike preference
+        spot = self._market_state.spot.get(symbol)
+        strike_pref_bonus = 0.0
+        try:
+            strike_val = float(meta.get("resolved_strike", meta.get("strike")))
+            if spot is not None:
+                signal_cfg = self._strategy_cfg.get("signal", {}) or {}
+                strike_pref = str(signal_cfg.get("strike_preference", "ATM")).upper()
+                moneyness = abs(strike_val - float(spot))
+                if strike_pref in ("ATM", "AUTO"):
+                    strike_pref_bonus = max(0.0, 1.0 - (moneyness / max(float(spot) * 0.01, 1.0))) * 0.05
+                elif strike_pref == "ITM":
+                    if (side == "CE" and strike_val <= float(spot)) or (side == "PE" and strike_val >= float(spot)):
+                        strike_pref_bonus = 0.05
+                elif strike_pref == "OTM":
+                    if (side == "CE" and strike_val > float(spot)) or (side == "PE" and strike_val < float(spot)):
+                        strike_pref_bonus = 0.05
+        except Exception:
+            strike_pref_bonus = 0.0
+
+        score = (
+            (liquidity_w * liquidity_score)
+            + (oi_w * oi_score)
+            + (iv_w * iv_score)
+            + (delta_w * delta_score)
+            - (spread_w * spread_penalty)
+            + strike_pref_bonus
+        )
+        # Avoid selecting dead contracts with zero LTP.
+        if ltp <= 0:
+            score -= 1.0
+        return {
+            "score": float(score),
+            "liquidity_score": float(liquidity_score),
+            "oi_score": float(oi_score),
+            "iv_score": float(iv_score),
+            "delta_score": float(delta_score),
+            "spread_penalty": float(spread_penalty),
+            "strike_pref_bonus": float(strike_pref_bonus),
+            "weights": {
+                "liquidity_weight": float(liquidity_w),
+                "oi_change_weight": float(oi_w),
+                "iv_rank_weight": float(iv_w),
+                "delta_proximity_weight": float(delta_w),
+                "spread_penalty_weight": float(spread_w),
+            },
+        }
+
+    def _strike_score(self, symbol: str, side: str, meta: Dict[str, Any], row: Dict[str, Any]) -> float:
+        return float(self._strike_score_details(symbol, side, meta, row).get("score", 0.0))
+
+    def _select_option_candidate(self, symbol: str, side: str, prefer_atm: bool = False) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+        candidates: list[tuple[float, Dict[str, Any], Dict[str, Any]]] = []
+        atm_strike = self._atm_strike_for_symbol(symbol)
+        for meta in self._option_instruments.values():
+            if meta.get("underlying") != symbol or meta.get("side") != side:
+                continue
+            key = meta.get("key")
+            if not key or key not in self._market_state.options:
+                continue
+            row = self._market_state.options.get(key) or {}
+            if prefer_atm:
+                if atm_strike is None:
+                    continue
+                try:
+                    strike_val = float(meta.get("resolved_strike", meta.get("strike")))
+                except Exception:
+                    continue
+                score = -abs(strike_val - atm_strike)
+            else:
+                score = self._strike_score(symbol, side, meta, row)
+            candidates.append((score, meta, row))
         if not candidates:
             return None
-        candidates.sort(key=lambda x: x[0])
-        return float(candidates[0][1])
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        _, meta, row = candidates[0]
+        return meta, row
+
+    def _strike_candidates_debug(self, symbol: str, side: str) -> list[Dict[str, Any]]:
+        candidates: list[Dict[str, Any]] = []
+        selected = self._select_option_candidate(symbol, side, prefer_atm=False)
+        selected_key = (selected[0].get("key") if selected else None)
+        for meta in self._option_instruments.values():
+            if meta.get("underlying") != symbol or meta.get("side") != side:
+                continue
+            key = meta.get("key")
+            if not key:
+                continue
+            row = self._market_state.options.get(key)
+            if not isinstance(row, dict):
+                continue
+            details = self._strike_score_details(symbol, side, meta, row)
+            spread_pct = self._spread_pct_from_row(row)
+            strike_val = meta.get("resolved_strike", meta.get("strike"))
+            candidates.append(
+                {
+                    "key": key,
+                    "strike": strike_val,
+                    "offset": meta.get("offset"),
+                    "expiry": meta.get("resolved_expiry"),
+                    "ltp": row.get("ltp"),
+                    "oi": row.get("oi"),
+                    "iv": row.get("iv"),
+                    "delta": row.get("delta"),
+                    "bid": row.get("bid"),
+                    "ask": row.get("ask"),
+                    "volume": row.get("volume"),
+                    "spread_pct": spread_pct,
+                    "score": round(float(details.get("score", 0.0)), 6),
+                    "score_breakdown": details,
+                    "selected": bool(key == selected_key),
+                    "ts": row.get("ts"),
+                }
+            )
+        candidates.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        return candidates
+
+    def _get_delta_side(self, symbol: str, side: str) -> Optional[float]:
+        selected = self._select_option_candidate(symbol, side, prefer_atm=False)
+        if not selected:
+            return None
+        _, row = selected
+        try:
+            value = row.get("delta")
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
+    def _get_spread_pct(self, symbol: str, side: str) -> Optional[float]:
+        selected = self._select_option_candidate(symbol, side, prefer_atm=False)
+        if not selected:
+            return None
+        _, row = selected
+        return self._spread_pct_from_row(row)
+
+    def _get_option_price(self, symbol: str, side: str) -> Optional[float]:
+        selected = self._select_option_candidate(symbol, side, prefer_atm=False)
+        if not selected:
+            return None
+        _, row = selected
+        try:
+            ltp = row.get("ltp")
+            return float(ltp) if ltp is not None else None
+        except Exception:
+            return None
 
     def _get_option_row(self, symbol: str, side: str) -> Dict[str, Any]:
-        for meta in self._option_instruments.values():
-            if meta.get("underlying") == symbol and meta.get("side") == side:
-                key = meta.get("key")
-                if key and key in self._market_state.options:
-                    return self._market_state.options.get(key) or {}
-        return {}
+        selected = self._select_option_candidate(symbol, side, prefer_atm=False)
+        if not selected:
+            return {}
+        _, row = selected
+        return row
 
     def _is_data_fresh(self, symbol: str, side: str) -> bool:
         max_spot_age = int(self._data_quality_cfg.get("max_spot_tick_age_seconds", 20))
@@ -1276,6 +1433,9 @@ class OptionsRuntime:
         max_per_symbol = int(self._execution_cfg.get("max_open_positions_per_symbol", 1))
         if symbol and self._open_positions_for_symbol(symbol) >= max_per_symbol:
             failures.append("max_open_positions_symbol_reached")
+        max_per_index = int(self._execution_cfg.get("max_active_positions_per_index", max_per_symbol))
+        if symbol and max_per_index != max_per_symbol and self._open_positions_for_symbol(symbol) >= max_per_index:
+            failures.append("max_active_positions_index_reached")
         max_group_positions = int(self._execution_cfg.get("max_group_exposure_positions", 2))
         if symbol and self._open_positions_for_group(symbol) >= max_group_positions:
             failures.append("max_group_exposure_reached")
@@ -1782,6 +1942,36 @@ class OptionsRuntime:
             "diagnostics": self._last_no_trade_reasons,
         }
 
+    def get_strike_selection_debug(self, symbol: Optional[str] = None, side: Optional[str] = None) -> Dict[str, Any]:
+        symbols = sorted(self._allowed_symbols)
+        if symbol:
+            symbols = [s for s in symbols if s == symbol]
+        side_filter = str(side).upper() if side else None
+        if side_filter not in (None, "CE", "PE"):
+            side_filter = None
+        sides = [side_filter] if side_filter else ["CE", "PE"]
+
+        out: Dict[str, Any] = {
+            "enabled": self._enabled,
+            "strike_selection": dict(self._strike_selection_cfg or {}),
+            "symbols": {},
+        }
+        for sym in symbols:
+            out["symbols"][sym] = {
+                "spot": self._market_state.spot.get(sym),
+                "atm_strike": self._atm_strike_for_symbol(sym),
+                "sides": {},
+            }
+            for sd in sides:
+                candidates = self._strike_candidates_debug(sym, sd)
+                selected = next((c for c in candidates if c.get("selected")), None)
+                out["symbols"][sym]["sides"][sd] = {
+                    "count": len(candidates),
+                    "selected": selected,
+                    "candidates": candidates,
+                }
+        return out
+
     def get_metrics(self) -> Dict[str, Any]:
         closed = [t for t in self._paper_trades if t.get("type") == "close"]
         open_trades = [t for t in self._paper_trades if t.get("type") == "open"]
@@ -2060,31 +2250,18 @@ class OptionsRuntime:
         return sum(trs) / len(trs)
 
     def _get_oi_side(self, symbol: str, side: str) -> Optional[float]:
-        for meta in self._option_instruments.values():
-            if meta.get("underlying") == symbol and meta.get("side") == side:
-                key = meta.get("key")
-                if key and key in self._market_state.options:
-                    return self._market_state.options[key].get("oi")
-        return None
+        selected = self._select_option_candidate(symbol, side, prefer_atm=True)
+        if not selected:
+            return None
+        _, row = selected
+        return row.get("oi")
 
     def _get_option_meta(self, symbol: str, side: str) -> Dict[str, Any]:
-        candidates = []
-        spot = self._market_state.spot.get(symbol)
-        for meta in self._option_instruments.values():
-            if meta.get("underlying") == symbol and meta.get("side") == side:
-                strike = meta.get("resolved_strike", meta.get("strike"))
-                try:
-                    strike_val = float(strike)
-                except Exception:
-                    strike_val = None
-                if strike_val is not None and spot is not None:
-                    candidates.append((abs(strike_val - spot), meta))
-                else:
-                    candidates.append((0, meta))
-        if not candidates:
+        selected = self._select_option_candidate(symbol, side, prefer_atm=False)
+        if not selected:
             return {}
-        candidates.sort(key=lambda x: x[0])
-        return dict(candidates[0][1])
+        meta, _ = selected
+        return dict(meta)
 
     async def _notify_paper_summary(self, day: str) -> None:
         summary = self._paper_summary()

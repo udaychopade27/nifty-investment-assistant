@@ -158,6 +158,18 @@ async def options_project_check(request: Request, symbol: str | None = None):
     return runtime.get_project_check(symbol=symbol)
 
 
+@router.get("/strike-debug")
+async def options_strike_debug(
+    request: Request,
+    symbol: str | None = None,
+    side: str | None = None,
+):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {"enabled": False, "symbols": {}}
+    return runtime.get_strike_selection_debug(symbol=symbol, side=side)
+
+
 @router.get("/metrics")
 async def options_metrics(request: Request):
     runtime = getattr(request.app.state, "options_runtime", None)

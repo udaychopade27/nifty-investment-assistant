@@ -32,6 +32,8 @@ class OptionsSubscriptionManager:
 
         options_cfg = self._config_engine.get_options_setting("options")
         md_cfg = options_cfg.get("market_data", {}) or {}
+        strike_cfg = options_cfg.get("strike_selection", {}) or {}
+        max_subscribed = int(strike_cfg.get("max_subscribed_instruments", 25) or 25)
 
         spot_symbols = md_cfg.get("spot_symbols", []) or []
         option_symbols = md_cfg.get("option_symbols", []) or []
@@ -68,6 +70,8 @@ class OptionsSubscriptionManager:
             if key not in seen:
                 seen.add(key)
                 result.append(key)
+        if max_subscribed > 0 and len(result) > max_subscribed:
+            result = result[:max_subscribed]
         return result
 
     def get_subscription_mode(self) -> str:

@@ -223,6 +223,8 @@ async def set_monthly_capital(
 
             # Total monthly capital becomes inflow + carry-forward
             monthly_capital = (base_capital + tactical_capital).quantize(Decimal("0.01"))
+            # Recompute tranche from effective base bucket after carry-forward
+            daily_tranche = (base_capital / Decimal(trading_days)).quantize(Decimal("0.01"))
 
     config = await repo.create(
         month=month_date,

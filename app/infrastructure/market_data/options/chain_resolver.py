@@ -1,4 +1,4 @@
-"""Resolve ATM option instrument keys from Upstox option chain."""
+"""Resolve option instrument keys from Upstox option chain."""
 from __future__ import annotations
 
 from datetime import datetime, date
@@ -21,6 +21,7 @@ class OptionsChainResolver:
         instruments = md_cfg.get("option_instruments", []) or []
         if not instruments:
             return []
+        instruments = self._prepare_instruments(options_cfg, instruments)
 
         market_cfg = self._config_engine.get_app_setting("market_data")
         upstox_cfg = market_cfg.get("upstox", {})
@@ -36,6 +37,7 @@ class OptionsChainResolver:
             "Accept": "application/json",
         }
 
+        cached_ctx: Dict[str, Dict[str, Any]] = {}
         for inst in instruments:
             if not isinstance(inst, dict):
                 continue
@@ -52,24 +54,26 @@ class OptionsChainResolver:
             if not underlying_key:
                 continue
 
-            expiry = await self._get_nearest_expiry(api_base, headers, underlying_key)
-            if not expiry:
-                continue
-
-            chain = await self._get_option_chain(api_base, headers, underlying_key, expiry)
-            if not chain:
-                continue
-
-            spot = chain.get("underlying_price") or chain.get("underlyingPrice") or chain.get("spot_price") or chain.get("spotPrice")
-            if spot is None:
-                spot = await self._get_spot_price(api_base, instrument_map, underlying, underlying_key)
-            if strike == "ATM" and spot is not None and step > 0:
-                strike_val = round(float(spot) / step) * step
-            else:
-                try:
-                    strike_val = float(strike)
-                except Exception:
+            ctx = cached_ctx.get(underlying_key)
+            if ctx is None:
+                expiry = await self._get_nearest_expiry(api_base, headers, underlying_key)
+                if not expiry:
                     continue
+                chain = await self._get_option_chain(api_base, headers, underlying_key, expiry)
+                if not chain:
+                    continue
+                spot = chain.get("underlying_price") or chain.get("underlyingPrice") or chain.get("spot_price") or chain.get("spotPrice")
+                if spot is None:
+                    spot = await self._get_spot_price(api_base, instrument_map, underlying, underlying_key)
+                ctx = {"expiry": expiry, "chain": chain, "spot": spot}
+                cached_ctx[underlying_key] = ctx
+
+            expiry = ctx.get("expiry")
+            chain = ctx.get("chain")
+            spot = ctx.get("spot")
+            strike_val = self._resolve_target_strike(strike, step, spot)
+            if strike_val is None:
+                continue
 
             token_key, oi = self._pick_instrument(chain, strike_val, side)
             if token_key:
@@ -81,10 +85,107 @@ class OptionsChainResolver:
 
         return instruments
 
+    def _prepare_instruments(self, options_cfg: Dict[str, Any], instruments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        strike_cfg = (options_cfg.get("strike_selection") or {}) if isinstance(options_cfg, dict) else {}
+        mode = str(strike_cfg.get("mode", "atm_only")).lower()
+        dynamic_range = int(strike_cfg.get("range", 2) or 2)
+        max_total = int(strike_cfg.get("max_subscribed_instruments", 25) or 25)
+        if max_total < 1:
+            max_total = 25
+
+        if mode == "dynamic":
+            expanded = self._expand_dynamic_instruments(instruments, max(0, dynamic_range))
+        elif mode == "fixed":
+            expanded = [dict(item) for item in instruments if isinstance(item, dict)]
+        else:
+            # Default ATM only
+            expanded = []
+            seen = set()
+            for item in instruments:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("strike", "ATM")).upper() != "ATM":
+                    continue
+                key = (item.get("underlying"), item.get("side"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                expanded.append(dict(item))
+
+        # Deduplicate and cap.
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for item in expanded:
+            marker = (
+                item.get("underlying"),
+                item.get("side"),
+                str(item.get("strike")),
+                int(item.get("step") or 0),
+            )
+            if marker in seen:
+                continue
+            seen.add(marker)
+            deduped.append(item)
+            if len(deduped) >= max_total:
+                break
+        return deduped
+
+    def _expand_dynamic_instruments(self, instruments: List[Dict[str, Any]], dynamic_range: int) -> List[Dict[str, Any]]:
+        expanded: List[Dict[str, Any]] = []
+        templates: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for item in instruments:
+            if not isinstance(item, dict):
+                continue
+            underlying = item.get("underlying")
+            side = item.get("side")
+            if not underlying or side not in ("CE", "PE"):
+                continue
+            templates[(str(underlying), str(side))] = item
+
+        offsets = list(range(-dynamic_range, dynamic_range + 1))
+        for tpl in templates.values():
+            for offset in offsets:
+                strike_tag = "ATM" if offset == 0 else f"ATM{offset:+d}"
+                generated = dict(tpl)
+                generated["strike"] = strike_tag
+                generated["offset"] = offset
+                generated["key"] = None
+                expanded.append(generated)
+        return expanded
+
+    def _resolve_target_strike(self, strike: Any, step: int, spot: Any) -> Optional[float]:
+        if step <= 0:
+            return None
+        try:
+            spot_v = float(spot) if spot is not None else None
+        except Exception:
+            spot_v = None
+
+        strike_s = str(strike).upper() if strike is not None else "ATM"
+        if strike_s.startswith("ATM"):
+            if spot_v is None:
+                return None
+            atm = round(spot_v / step) * step
+            if strike_s == "ATM":
+                return float(atm)
+            # ATM+1 / ATM-2 style.
+            suffix = strike_s.replace("ATM", "", 1).strip()
+            try:
+                offset = int(suffix)
+            except Exception:
+                offset = 0
+            return float(atm + (offset * step))
+
+        try:
+            return float(strike)
+        except Exception:
+            return None
+
     async def resolve_debug(self) -> Dict[str, Any]:
         options_cfg = self._config_engine.get_options_setting("options")
         md_cfg = options_cfg.get("market_data", {}) or {}
         instruments = md_cfg.get("option_instruments", []) or []
+        instruments = self._prepare_instruments(options_cfg, instruments)
 
         market_cfg = self._config_engine.get_app_setting("market_data")
         upstox_cfg = market_cfg.get("upstox", {})
