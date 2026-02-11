@@ -39,6 +39,7 @@ from app.utils.notifications import send_tiered_telegram_message
 import asyncio
 from app.infrastructure.db.database import async_session_factory
 from app.infrastructure.repositories.options.signal_repository import OptionsSignalRepository
+from app.infrastructure.repositories.options.capital_repository import OptionsCapitalRepository
 from app.utils.time import IST
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ class OptionsRuntime:
         self._last_spot_tick_ts: Dict[str, datetime] = {}
         self._data_anomalies: Dict[str, deque] = {}
         self._ml_drift_state: Dict[str, Any] = {"gate_blocked": False, "window": []}
+        self._capital_db_overrides: Dict[str, float] = {}
 
     @staticmethod
     def _current_month_key() -> str:
@@ -186,12 +188,37 @@ class OptionsRuntime:
 
         # Subscribe to ticks without touching ETF logic
         self._realtime_runtime.subscribe_ticks(self._handle_tick)
+        await self._load_capital_overrides_from_db()
         self._load_runtime_state()
         logger.info("Options runtime subscribed to ticks")
 
     async def stop(self) -> None:
         self._save_runtime_state()
         return None
+
+    @staticmethod
+    def _month_key_to_date(month_key: str):
+        from datetime import date
+
+        y, m = [int(x) for x in str(month_key).split("-", 1)]
+        return date(y, m, 1)
+
+    async def _load_capital_overrides_from_db(self) -> None:
+        if async_session_factory is None:
+            return
+        months = [self._current_month_key(), self._previous_month_key(self._current_month_key())]
+        try:
+            async with async_session_factory() as session:
+                repo = OptionsCapitalRepository(session)
+                for mk in months:
+                    try:
+                        row = await repo.get_month(self._month_key_to_date(mk))
+                    except Exception:
+                        row = None
+                    if row and row.get("monthly_capital") is not None:
+                        self._capital_db_overrides[mk] = float(row["monthly_capital"])
+        except Exception as exc:
+            logger.warning("options capital db preload failed: %s", exc)
 
     async def _handle_tick(self, event):
         # Placeholder for options market state ingestion.
@@ -2240,7 +2267,9 @@ class OptionsRuntime:
             raise ValueError(f"monthly_capital for {target_month} already initialized; use /capital/topup")
         existing = self._get_monthly_capital_for_month(target_month)
         rollover = self._rollover_for_month(target_month)
-        overrides[target_month] = round(float(amount) + float(rollover), 2)
+        new_capital = round(float(amount) + float(rollover), 2)
+        overrides[target_month] = new_capital
+        self._capital_db_overrides[target_month] = new_capital
         self._apply_project_capital_rules()
         self._record_audit(
             "capital_init",
@@ -2272,7 +2301,9 @@ class OptionsRuntime:
         existing = month_override if month_override is not None else self._get_monthly_capital_for_month(target_month)
         rollover = self._rollover_for_month(target_month) if month_override is None else 0.0
         base = float(month_override) if month_override is not None else float(rollover)
-        overrides[target_month] = round(base + float(amount), 2)
+        new_capital = round(base + float(amount), 2)
+        overrides[target_month] = new_capital
+        self._capital_db_overrides[target_month] = new_capital
         self._apply_project_capital_rules()
         self._record_audit(
             "capital_update",
@@ -2303,6 +2334,11 @@ class OptionsRuntime:
         return self.topup_monthly_capital(amount, month=month)
 
     def _get_month_override_value(self, month: str) -> float | None:
+        if month in self._capital_db_overrides:
+            try:
+                return float(self._capital_db_overrides[month])
+            except Exception:
+                return None
         capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
         overrides = capital_cfg.get("monthly_capital_overrides") or {}
         if isinstance(overrides, dict) and month in overrides:

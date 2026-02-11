@@ -6,13 +6,14 @@ from app.infrastructure.market_data.options.subscription_manager import OptionsS
 from pathlib import Path
 from datetime import date as date_type
 from datetime import date
-import yaml
+from datetime import datetime
 
 from app.infrastructure.db.database import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.infrastructure.repositories.options.signal_repository import OptionsSignalRepository
 from app.infrastructure.repositories.options.capital_repository import OptionsCapitalRepository
 from app.infrastructure.market_data.options.chain_resolver import OptionsChainResolver
+from app.utils.time import IST
 
 router = APIRouter()
 
@@ -241,11 +242,10 @@ async def options_set_monthly_capital(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    config_path = _persist_capital_override(update)
     await _persist_capital_audit(db, update, amount=float(payload.monthly_capital))
     return {
         "status": "ok",
-        "persisted_file": str(config_path),
+        "persisted_file": "database_only",
         **update,
     }
 
@@ -265,11 +265,10 @@ async def options_topup_monthly_capital(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    config_path = _persist_capital_override(update)
     await _persist_capital_audit(db, update, amount=float(payload.topup_amount))
     return {
         "status": "ok",
-        "persisted_file": str(config_path),
+        "persisted_file": "database_only",
         **update,
     }
 
@@ -288,20 +287,45 @@ async def options_capital_events(
     return {"count": len(items), "items": items}
 
 
-def _persist_capital_override(update: dict) -> Path:
-    config_path = Path(__file__).resolve().parents[4] / "config" / "options" / "options.yml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+@router.get("/capital/current")
+async def options_capital_current(
+    request: Request,
+    month: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    month_key = month or datetime.now(IST).strftime("%Y-%m")
+    month_date = _month_key_to_date(month_key)
+    repo = OptionsCapitalRepository(db)
+    row = await repo.get_month(month_date)
 
-    options_cfg = cfg.setdefault("options", {})
-    project_cfg = options_cfg.setdefault("project", {})
-    capital_cfg = project_cfg.setdefault("capital", {})
-    overrides = capital_cfg.setdefault("monthly_capital_overrides", {})
-    overrides[update["month"]] = float(update["monthly_capital"])
+    if row is not None:
+        return {
+            "month": month_key,
+            "monthly_capital": float(row.get("monthly_capital") or 0.0),
+            "initialized": bool(row.get("initialized", False)),
+            "source": "database",
+            "updated_at": row.get("updated_at"),
+        }
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-    return config_path
+    fallback = None
+    if runtime:
+        project = runtime.get_project_check()
+        if project and project.get("month") == month_key:
+            fallback = float(project.get("monthly_capital") or 0.0)
+    if fallback is None:
+        config_dir = Path(__file__).resolve().parents[4] / "config"
+        config_engine = ConfigEngine(config_dir)
+        config_engine.load_all()
+        cap_cfg = config_engine.get_options_setting("options", "project", "capital") or {}
+        fallback = float(cap_cfg.get("monthly_capital", 0.0))
+    return {
+        "month": month_key,
+        "monthly_capital": float(fallback or 0.0),
+        "initialized": False,
+        "source": "fallback",
+        "updated_at": None,
+    }
 
 
 def _month_key_to_date(month_key: str) -> date:
