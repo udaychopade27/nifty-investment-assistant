@@ -100,6 +100,20 @@ options:
     slippage_pct: 0.0
     mid_vol_slippage_pct: 0.1
     high_vol_slippage_pct: 0.2
+    spread_slippage_factor: 0.2
+    open_session_extra_slippage_pct: 0.15
+    close_session_extra_slippage_pct: 0.15
+    fill_probability_base: 0.98
+    fill_probability_spread_penalty_factor: 0.03
+    partial_fill_min_ratio: 0.6
+    partial_fill_max_ratio: 1.0
+    costs:
+      brokerage_per_order: 20
+      stt_rate: 0.0005
+      exchange_txn_rate: 0.00053
+      sebi_rate: 0.000001
+      gst_rate: 0.18
+      stamp_duty_rate: 0.00003
   execution:
     mode: paper
     live_ordering_enabled: false
@@ -108,12 +122,20 @@ options:
     max_open_positions: 2
     max_open_notional_pct: 0.6
     pretrade_margin_buffer_pct: 0.1
+    max_open_positions_per_symbol: 1
+    max_group_exposure_positions: 2
+    correlation_groups:
+    - name: index_options
+      symbols:
+      - NIFTY 50
+      - NIFTY BANK
   data_quality:
     max_spot_tick_age_seconds: 20
     max_option_tick_age_seconds: 20
     max_spot_jump_pct: 2.0
     max_spread_pct_circuit: 1.2
     anomaly_cooldown_seconds: 120
+    min_data_quality_score: 0.65
   operations:
     persist_runtime_state: true
     runtime_state_file: data/options_runtime_state.json
@@ -146,6 +168,11 @@ options:
         iv_direction: 15
         time_of_day: 10
         event_risk: 5
+      regime_min_score_overrides:
+        Trending: 68
+        Range: 74
+        Volatile: 76
+      min_expected_edge_after_costs: 0.15
     capital:
       monthly_capital: 15000
       lock_monthly_capital_after_first_set: true
@@ -155,5 +182,17 @@ options:
       daily_max_loss_pct: 0.12
       weekly_max_loss_pct: 0.25
       max_trades_per_day: 2
+      options_risk_budget_pct_of_monthly: 0.6
       monthly_capital_overrides:
-        2026-02: 10000.0
+        2026-02: 12000.0
+  session_controls:
+    open_buffer_minutes: 15
+    close_buffer_minutes: 20
+  ml_pipeline:
+    feature_version: v2
+    mode: shadow
+    drift_guard:
+      enabled: true
+      window_trades: 20
+      min_win_rate_pct: 35
+      min_avg_pnl: -50

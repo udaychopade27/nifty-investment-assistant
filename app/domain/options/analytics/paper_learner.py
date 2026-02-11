@@ -9,6 +9,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any, Dict
+from datetime import datetime
 
 
 def build_features(signal: Dict[str, Any], indicator: Dict[str, Any]) -> Dict[str, float]:
@@ -141,3 +142,84 @@ class PaperSignalLearner:
             # Non-fatal in production runtime; learning continues in memory.
             return
 
+    def train_from_samples(self, samples_path: str) -> Dict[str, Any]:
+        path = Path(samples_path)
+        if not self.enabled:
+            return {"trained": False, "reason": "ml_disabled"}
+        if not path.exists():
+            return {"trained": False, "reason": "samples_not_found"}
+        count = 0
+        wins = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                feats = row.get("features") or {}
+                won = bool(row.get("won", False))
+            except Exception:
+                continue
+            self.observe(feats, won=won)
+            count += 1
+            if won:
+                wins += 1
+        return {
+            "trained": True,
+            "samples_used": count,
+            "wins": wins,
+            "win_rate": round((wins / count) * 100.0, 2) if count else 0.0,
+            "status": self.status(),
+        }
+
+    def walk_forward_evaluate(self, samples_path: str, train_ratio: float = 0.7) -> Dict[str, Any]:
+        path = Path(samples_path)
+        if not path.exists():
+            return {"ok": False, "reason": "samples_not_found"}
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                ts = row.get("ts")
+                dt = datetime.fromisoformat(str(ts)) if ts else datetime.min
+                rows.append((dt, row))
+            except Exception:
+                continue
+        if len(rows) < 20:
+            return {"ok": False, "reason": "insufficient_samples", "samples": len(rows)}
+        rows.sort(key=lambda x: x[0])
+        split = max(1, int(len(rows) * float(train_ratio)))
+        train_rows = rows[:split]
+        test_rows = rows[split:]
+        if not test_rows:
+            return {"ok": False, "reason": "insufficient_test_samples", "samples": len(rows)}
+
+        # Reset in-memory model and train.
+        self.weights = {}
+        self.samples = 0
+        self.wins = 0
+        for _, row in train_rows:
+            self.observe(row.get("features") or {}, won=bool(row.get("won", False)))
+
+        total = 0
+        correct = 0
+        pnl = 0.0
+        for _, row in test_rows:
+            feats = row.get("features") or {}
+            pred = self.predict(feats)
+            pred_won = pred >= self.min_score
+            actual_won = bool(row.get("won", False))
+            if pred_won == actual_won:
+                correct += 1
+            total += 1
+            pnl += float(row.get("pnl", 0.0))
+
+        return {
+            "ok": True,
+            "train_samples": len(train_rows),
+            "test_samples": len(test_rows),
+            "directional_accuracy_pct": round((correct / total) * 100.0, 2) if total else 0.0,
+            "test_pnl": round(pnl, 2),
+            "status": self.status(),
+        }

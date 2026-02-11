@@ -130,6 +130,22 @@ async def options_readiness(request: Request):
     return runtime.get_readiness_check()
 
 
+@router.post("/ml/train")
+async def options_ml_train(request: Request):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {"enabled": False, "trained": False}
+    return runtime.train_ml_from_samples()
+
+
+@router.get("/ml/evaluate")
+async def options_ml_evaluate(request: Request):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {"enabled": False, "ok": False}
+    return runtime.evaluate_ml_walk_forward()
+
+
 @router.get("/walk-forward")
 async def options_walk_forward(
     request: Request,

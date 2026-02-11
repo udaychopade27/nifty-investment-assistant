@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 from collections import deque
 from pathlib import Path
 import json
+import random
 
 from app.domain.services.config_engine import ConfigEngine
 from app.infrastructure.market_data.options.subscription_manager import OptionsSubscriptionManager
@@ -92,6 +93,7 @@ class OptionsRuntime:
         self._data_quality_cfg: Dict[str, Any] = {}
         self._ops_cfg: Dict[str, Any] = {}
         self._promotion_cfg: Dict[str, Any] = {}
+        self._ml_pipeline_cfg: Dict[str, Any] = {}
         self._runtime_state_file: Path = Path("data/options_runtime_state.json")
         self._audit_log: deque = deque(maxlen=500)
         self._metrics: Dict[str, float] = {
@@ -111,6 +113,7 @@ class OptionsRuntime:
         self._last_option_tick_ts: Dict[str, datetime] = {}
         self._last_spot_tick_ts: Dict[str, datetime] = {}
         self._data_anomalies: Dict[str, deque] = {}
+        self._ml_drift_state: Dict[str, Any] = {"gate_blocked": False, "window": []}
 
     @staticmethod
     def _current_month_key() -> str:
@@ -149,6 +152,7 @@ class OptionsRuntime:
         self._data_quality_cfg = options_cfg.get("data_quality", {}) or {}
         self._ops_cfg = options_cfg.get("operations", {}) or {}
         self._promotion_cfg = options_cfg.get("promotion_gates", {}) or {}
+        self._ml_pipeline_cfg = options_cfg.get("ml_pipeline", {}) or {}
         self._runtime_state_file = Path(str(self._ops_cfg.get("runtime_state_file", "data/options_runtime_state.json")))
         md_cfg = options_cfg.get("market_data", {}) or {}
         self._paper_cfg = options_cfg.get("paper_trading", {}) or {}
@@ -416,6 +420,9 @@ class OptionsRuntime:
         spread_ce_pct = self._get_spread_pct(symbol, "CE")
         spread_pe_pct = self._get_spread_pct(symbol, "PE")
         close_5m, vwap_5m, ts_5m = self._get_5m_confirmation(history_5m)
+        data_quality_score = self._compute_data_quality_score(symbol, spread_ce_pct, spread_pe_pct)
+        flat_threshold = float(self._config_engine.get_options_setting("options", "risk", "flat_atr_threshold"))
+        regime = "Trending" if atr is not None and float(atr) >= flat_threshold else "Range"
         return {
             "ts": history[-1].ts.isoformat(),
             "open": history[-1].open,
@@ -442,10 +449,35 @@ class OptionsRuntime:
             "close_5m": close_5m,
             "vwap_5m": vwap_5m,
             "ts_5m": ts_5m,
+            "data_quality_score": data_quality_score,
+            "regime": regime,
             "rsi": rsi_value,
             "macd_hist": macd_hist,
             "boll_pos": boll_pos,
         }
+
+    def _compute_data_quality_score(
+        self,
+        symbol: str,
+        spread_ce_pct: Optional[float],
+        spread_pe_pct: Optional[float],
+    ) -> float:
+        score = 1.0
+        max_spread = float(self._strict_cfg.get("max_spread_pct", 0.6))
+        if spread_ce_pct is None or spread_pe_pct is None:
+            score -= 0.2
+        else:
+            if spread_ce_pct > max_spread:
+                score -= min(0.25, (spread_ce_pct - max_spread) / max_spread * 0.1)
+            if spread_pe_pct > max_spread:
+                score -= min(0.25, (spread_pe_pct - max_spread) / max_spread * 0.1)
+        if self._recent_anomaly(symbol):
+            score -= 0.25
+        if not self._is_data_fresh(symbol, "CE"):
+            score -= 0.15
+        if not self._is_data_fresh(symbol, "PE"):
+            score -= 0.15
+        return round(max(0.0, min(1.0, score)), 3)
 
     def _update_5m_candle(self, symbol: str, candle_1m) -> Optional[Any]:
         builder = self._candles_5m.get(symbol)
@@ -770,6 +802,12 @@ class OptionsRuntime:
         anomaly = self._recent_anomaly(symbol)
         if anomaly:
             failures.append(f"circuit_breaker:{anomaly}")
+        min_quality = float(self._data_quality_cfg.get("min_data_quality_score", 0.65))
+        dqs = indicator.get("data_quality_score")
+        if dqs is None:
+            failures.append("missing_data_quality_score")
+        elif float(dqs) < min_quality:
+            failures.append("data_quality_below_threshold")
 
         score_cfg = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
         intraday_window = score_cfg.get("intraday_window", ["09:45", "13:30"])
@@ -789,6 +827,17 @@ class OptionsRuntime:
             return (sh, sm) <= now_hm <= (eh, em)
         except Exception:
             return False
+
+    def _effective_project_min_score(self, score_cfg: Dict[str, Any], indicator: Dict[str, Any]) -> int:
+        base = int(score_cfg.get("min_score", 70))
+        regime = str(indicator.get("regime", "Range"))
+        overrides = score_cfg.get("regime_min_score_overrides", {})
+        if isinstance(overrides, dict) and regime in overrides:
+            try:
+                return int(overrides.get(regime))
+            except Exception:
+                return base
+        return base
 
     def _compute_signal(self, symbol: str, indicator: Optional[Dict[str, Any]], overrides: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         if not indicator:
@@ -919,6 +968,19 @@ class OptionsRuntime:
         if force_direction is None and rr < min_rr:
             self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["rr_below_threshold"]}
             return None
+        est_cost_per_unit = self._compute_trade_costs(entry, target, 1)
+        expected_edge = reward - est_cost_per_unit
+        score_cfg_local = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
+        min_edge = float(score_cfg_local.get("min_expected_edge_after_costs", 0.15))
+        if force_direction is None and expected_edge < min_edge:
+            self._last_no_trade_reasons[symbol] = {
+                "symbol": symbol,
+                "ts": indicator.get("ts"),
+                "signal_type": signal_type,
+                "reasons": ["edge_after_costs_too_low"],
+                "expected_edge": round(expected_edge, 3),
+            }
+            return None
 
         # Base confidence gate before risk booking / alerting.
         pre_signal = {
@@ -941,7 +1003,7 @@ class OptionsRuntime:
             event_risk_blocked=event_risk_blocked,
             intraday_window=(str(intraday_window[0]), str(intraday_window[1])),
         )
-        min_project_score = int(score_cfg.get("min_score", 70))
+        min_project_score = self._effective_project_min_score(score_cfg, indicator)
         if force_direction is None and confidence_score < min_project_score:
             self._last_no_trade_reasons[symbol] = {
                 "symbol": symbol,
@@ -960,8 +1022,15 @@ class OptionsRuntime:
             self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["confidence_below_threshold"], "base_confidence": round(base_conf, 3)}
             return None
         features = build_features(pre_signal, indicator)
+        feature_version = str(self._ml_pipeline_cfg.get("feature_version", "v1"))
+        features["data_quality_score"] = float(indicator.get("data_quality_score") or 0.0)
+        features["regime_trending"] = 1.0 if str(indicator.get("regime", "Range")) == "Trending" else 0.0
         ml_score = self._learner.predict(features)
-        if force_direction is None and not self._learner.allow_signal(features):
+        ml_mode = str(self._ml_pipeline_cfg.get("mode", "gate")).lower()
+        if force_direction is None and self._ml_drift_state.get("gate_blocked"):
+            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["ml_drift_guard_blocked"], "ml_score": round(ml_score, 3)}
+            return None
+        if force_direction is None and ml_mode == "gate" and not self._learner.allow_signal(features):
             self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["ml_score_below_threshold"], "ml_score": round(ml_score, 3)}
             return None
 
@@ -997,12 +1066,18 @@ class OptionsRuntime:
             "blocked": False,
             "entry_source": "option_ltp",
             "qty": qty,
+            "estimated_cost_per_unit": round(est_cost_per_unit, 2),
+            "expected_edge_after_costs": round(expected_edge, 2),
             "atr": indicator.get("atr"),
             "pcr": indicator.get("pcr"),
+            "spread_ce_pct": indicator.get("spread_ce_pct"),
+            "spread_pe_pct": indicator.get("spread_pe_pct"),
             "confidence_base": base_conf,
             "confidence_score": confidence_score,
             "confidence_breakdown": confidence_breakdown,
             "ml_score": round(ml_score, 3),
+            "ml_mode": ml_mode,
+            "feature_version": feature_version,
             "_ml_features": features,
         }
         self._metrics["signals_generated"] = float(self._metrics.get("signals_generated", 0)) + 1
@@ -1017,6 +1092,7 @@ class OptionsRuntime:
         capital_cfg = (self._project_cfg.get("capital") or {}) if isinstance(self._project_cfg, dict) else {}
         monthly_capital = self._get_monthly_capital() or 0.0
         weekly_loss_cap = float(capital_cfg.get("weekly_max_loss_pct", 0.25)) * monthly_capital
+        options_budget_cap = float(capital_cfg.get("options_risk_budget_pct_of_monthly", 0.60)) * monthly_capital
 
         if self._risk_state.get("daily_sl_hits", 0) >= 1:
             return False
@@ -1034,6 +1110,8 @@ class OptionsRuntime:
         if float(self._risk_state.get("daily_realized_pnl", 0.0)) <= -max_loss:
             return False
         if self._risk_state["risk_used"] + risk > max_loss:
+            return False
+        if options_budget_cap > 0 and (self._risk_state["risk_used"] + risk) > options_budget_cap:
             return False
         return True
 
@@ -1069,6 +1147,23 @@ class OptionsRuntime:
             total += float(pos.get("entry", 0.0)) * float(pos.get("qty", 0.0))
         return total
 
+    def _open_positions_for_symbol(self, symbol: str) -> int:
+        return sum(1 for p in self._paper_positions.values() if p.get("status") == "open" and p.get("symbol") == symbol)
+
+    def _open_positions_for_group(self, symbol: str) -> int:
+        groups = self._execution_cfg.get("correlation_groups") or []
+        symbols_in_group = None
+        for grp in groups:
+            if not isinstance(grp, dict):
+                continue
+            vals = grp.get("symbols") or []
+            if symbol in vals:
+                symbols_in_group = set(vals)
+                break
+        if not symbols_in_group:
+            return 0
+        return sum(1 for p in self._paper_positions.values() if p.get("status") == "open" and p.get("symbol") in symbols_in_group)
+
     def _execution_precheck_failures(self, signal: Dict[str, Any]) -> list[str]:
         failures: list[str] = []
         mode = str(self._execution_cfg.get("mode", "paper")).lower()
@@ -1090,6 +1185,13 @@ class OptionsRuntime:
         max_open_positions = int(self._execution_cfg.get("max_open_positions", 2))
         if len(self._paper_positions) >= max_open_positions:
             failures.append("max_open_positions_reached")
+        symbol = str(signal.get("symbol") or "")
+        max_per_symbol = int(self._execution_cfg.get("max_open_positions_per_symbol", 1))
+        if symbol and self._open_positions_for_symbol(symbol) >= max_per_symbol:
+            failures.append("max_open_positions_symbol_reached")
+        max_group_positions = int(self._execution_cfg.get("max_group_exposure_positions", 2))
+        if symbol and self._open_positions_for_group(symbol) >= max_group_positions:
+            failures.append("max_group_exposure_reached")
         monthly_capital = float(self._get_monthly_capital() or 0.0)
         max_notional_pct = float(self._execution_cfg.get("max_open_notional_pct", 0.60))
         cap_notional = monthly_capital * max_notional_pct
@@ -1265,23 +1367,52 @@ class OptionsRuntime:
                 slippage_pct += float(self._paper_cfg.get("high_vol_slippage_pct", 0.2))
             elif atr >= 10:
                 slippage_pct += float(self._paper_cfg.get("mid_vol_slippage_pct", 0.1))
+        # Add spread- and session-aware slippage.
+        spread_key = "spread_ce_pct" if side == "CE" else "spread_pe_pct"
+        spread_pct = float(signal.get(spread_key) or 0.0)
+        slippage_pct += spread_pct * float(self._paper_cfg.get("spread_slippage_factor", 0.2))
+        slippage_pct += self._session_extra_slippage_pct()
         entry = float(signal.get("entry", 0))
         entry = entry * (1 + slippage_pct / 100.0)
+        fill_probability = max(
+            0.0,
+            min(
+                1.0,
+                float(self._paper_cfg.get("fill_probability_base", 0.98))
+                - (spread_pct * float(self._paper_cfg.get("fill_probability_spread_penalty_factor", 0.03))),
+            ),
+        )
+        if random.random() > fill_probability:
+            self._record_audit(
+                "paper_trade_rejected_fill",
+                {"symbol": signal.get("symbol"), "side": side, "fill_probability": round(fill_probability, 3)},
+            )
+            return
+        min_ratio = float(self._paper_cfg.get("partial_fill_min_ratio", 0.6))
+        max_ratio = float(self._paper_cfg.get("partial_fill_max_ratio", 1.0))
+        fill_ratio = random.uniform(min_ratio, max_ratio)
+        fill_qty = max(1, int(round(qty * fill_ratio)))
         position_id = f"{signal.get('symbol')}:{side}:{signal.get('ts')}"
         position = {
             "id": position_id,
             "symbol": signal.get("symbol"),
             "side": side,
             "entry": round(entry, 2),
-            "qty": qty,
+            "qty": fill_qty,
+            "requested_qty": qty,
+            "fill_probability": round(fill_probability, 3),
+            "fill_ratio": round(fill_ratio, 3),
             "stop_loss": signal.get("stop_loss"),
             "target": signal.get("target"),
             "status": "open",
             "entry_ts": signal.get("ts"),
             "last_price": entry,
             "unrealized_pnl": 0.0,
+            "mfe": 0.0,
+            "mae": 0.0,
             "ml_score": signal.get("ml_score"),
             "ml_features": signal.get("_ml_features"),
+            "feature_version": signal.get("feature_version"),
             "entry_slippage_pct": round(slippage_pct, 3),
             "max_hold_minutes": int(signal.get("max_hold_minutes") or self._strategy_cfg.get("signal", {}).get("max_hold_minutes", 20)),
             "trail_active": False,
@@ -1302,7 +1433,10 @@ class OptionsRuntime:
             if pos.get("symbol") != underlying or pos.get("side") != side or pos.get("status") != "open":
                 continue
             pos["last_price"] = round(price, 2)
-            pos["unrealized_pnl"] = round((price - pos["entry"]) * pos["qty"], 2)
+            gross = (price - pos["entry"]) * pos["qty"]
+            pos["unrealized_pnl"] = round(gross, 2)
+            pos["mfe"] = round(max(float(pos.get("mfe", 0.0)), gross), 2)
+            pos["mae"] = round(min(float(pos.get("mae", 0.0)), gross), 2)
             self._apply_trailing_stop(pos, price)
             if self._is_max_hold_exceeded(pos, ts):
                 self._paper_trade_close(pos_id, price, ts, "max_hold")
@@ -1319,8 +1453,15 @@ class OptionsRuntime:
         pos["status"] = "closed"
         pos["exit_price"] = round(exit_price, 2)
         pos["exit_ts"] = ts.isoformat()
-        pos["realized_pnl"] = round((exit_price - pos["entry"]) * pos["qty"], 2)
+        gross_pnl = round((exit_price - pos["entry"]) * pos["qty"], 2)
+        costs = self._compute_trade_costs(pos["entry"], exit_price, int(pos["qty"]))
+        net_pnl = round(gross_pnl - costs, 2)
+        pos["gross_pnl"] = gross_pnl
+        pos["costs"] = round(costs, 2)
+        pos["realized_pnl"] = net_pnl
         pos["exit_reason"] = reason
+        pos["label_won_net"] = bool(net_pnl > 0)
+        pos["label_won_gross"] = bool(gross_pnl > 0)
         self._paper_trades.append({"type": "close", **pos})
         self._refresh_risk_state()
         realized = float(pos.get("realized_pnl") or 0.0)
@@ -1335,14 +1476,30 @@ class OptionsRuntime:
         self._risk_state["monthly_realized_pnl"] = self._monthly_realized_pnl()
         features = pos.get("ml_features")
         if isinstance(features, dict):
-            self._learner.observe(features, won=bool(pos["realized_pnl"] > 0))
-            self._append_learning_sample(features, won=bool(pos["realized_pnl"] > 0), pnl=float(pos["realized_pnl"]))
+            won = bool(pos["realized_pnl"] > 0)
+            self._learner.observe(features, won=won)
+            self._append_learning_sample(
+                features,
+                won=won,
+                pnl=float(pos["realized_pnl"]),
+                meta={
+                    "symbol": pos.get("symbol"),
+                    "exit_reason": reason,
+                    "mfe": pos.get("mfe"),
+                    "mae": pos.get("mae"),
+                    "gross_pnl": pos.get("gross_pnl"),
+                    "costs": pos.get("costs"),
+                    "feature_version": pos.get("feature_version"),
+                    "label_type": "net_pnl_after_costs",
+                },
+            )
+        self._update_ml_drift_state(float(pos.get("realized_pnl", 0.0)))
         self._paper_positions.pop(pos_id, None)
         self._record_audit("paper_trade_close", {"id": pos_id, "reason": reason, "realized_pnl": pos.get("realized_pnl", 0.0)})
         self._save_runtime_state()
         self._refresh_paper_state()
 
-    def _append_learning_sample(self, features: Dict[str, Any], won: bool, pnl: float) -> None:
+    def _append_learning_sample(self, features: Dict[str, Any], won: bool, pnl: float, meta: Optional[Dict[str, Any]] = None) -> None:
         cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
         sample_path = Path(str(cfg.get("samples_path", "data/options_paper_samples.jsonl")))
         payload = {
@@ -1350,6 +1507,7 @@ class OptionsRuntime:
             "won": bool(won),
             "pnl": round(float(pnl), 2),
             "features": features,
+            "meta": meta or {},
         }
         try:
             sample_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1357,6 +1515,58 @@ class OptionsRuntime:
                 f.write(json.dumps(payload) + "\n")
         except Exception:
             return
+
+    def _session_extra_slippage_pct(self) -> float:
+        try:
+            now = datetime.now(IST)
+            session_cfg = self._config_engine.get_options_setting("options", "session_controls") or {}
+            open_buf = int(session_cfg.get("open_buffer_minutes", 15))
+            close_buf = int(session_cfg.get("close_buffer_minutes", 20))
+            open_h, open_m = map(int, self._market_open_time.split(":"))
+            close_h, close_m = map(int, self._market_close_time.split(":"))
+            open_dt = now.replace(hour=open_h, minute=open_m, second=0, microsecond=0)
+            close_dt = now.replace(hour=close_h, minute=close_m, second=0, microsecond=0)
+            if now <= open_dt + timedelta(minutes=open_buf):
+                return float(self._paper_cfg.get("open_session_extra_slippage_pct", 0.15))
+            if now >= close_dt - timedelta(minutes=close_buf):
+                return float(self._paper_cfg.get("close_session_extra_slippage_pct", 0.15))
+        except Exception:
+            return 0.0
+        return 0.0
+
+    def _compute_trade_costs(self, entry: float, exit_price: float, qty: int) -> float:
+        costs_cfg = self._paper_cfg.get("costs", {}) or {}
+        brokerage = float(costs_cfg.get("brokerage_per_order", 20.0)) * 2.0
+        turnover = max(0.0, float(entry) * qty) + max(0.0, float(exit_price) * qty)
+        stt = turnover * float(costs_cfg.get("stt_rate", 0.0005))
+        exch = turnover * float(costs_cfg.get("exchange_txn_rate", 0.00053))
+        sebi = turnover * float(costs_cfg.get("sebi_rate", 0.000001))
+        stamp = (max(0.0, float(entry) * qty)) * float(costs_cfg.get("stamp_duty_rate", 0.00003))
+        gst = (brokerage + exch) * float(costs_cfg.get("gst_rate", 0.18))
+        return round(brokerage + stt + exch + sebi + stamp + gst, 2)
+
+    def _update_ml_drift_state(self, pnl: float) -> None:
+        guard_cfg = (self._ml_pipeline_cfg.get("drift_guard") or {}) if isinstance(self._ml_pipeline_cfg, dict) else {}
+        if not bool(guard_cfg.get("enabled", True)):
+            self._ml_drift_state["gate_blocked"] = False
+            return
+        window_n = int(guard_cfg.get("window_trades", 20))
+        min_wr = float(guard_cfg.get("min_win_rate_pct", 35.0))
+        min_avg_pnl = float(guard_cfg.get("min_avg_pnl", -50.0))
+        window = self._ml_drift_state.get("window")
+        if not isinstance(window, list):
+            window = []
+        window.append(float(pnl))
+        if len(window) > window_n:
+            window = window[-window_n:]
+        self._ml_drift_state["window"] = window
+        if len(window) < max(5, window_n // 2):
+            self._ml_drift_state["gate_blocked"] = False
+            return
+        wins = sum(1 for x in window if x > 0)
+        win_rate = (wins / len(window)) * 100.0
+        avg_pnl = sum(window) / len(window)
+        self._ml_drift_state["gate_blocked"] = bool(win_rate < min_wr or avg_pnl < min_avg_pnl)
 
     def _is_max_hold_exceeded(self, pos: Dict[str, Any], ts: datetime) -> bool:
         try:
@@ -1489,9 +1699,21 @@ class OptionsRuntime:
             "enabled": self._enabled,
             "execution_mode": str(self._execution_cfg.get("mode", "paper")),
             "metrics": dict(self._metrics),
+            "ml_mode": str(self._ml_pipeline_cfg.get("mode", "gate")),
+            "ml_drift_guard": dict(self._ml_drift_state),
             "open_positions": len(self._paper_positions),
             "audit_events": len(self._audit_log),
         }
+
+    def train_ml_from_samples(self) -> Dict[str, Any]:
+        cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
+        samples_path = str(cfg.get("samples_path", "data/options_paper_samples.jsonl"))
+        return self._learner.train_from_samples(samples_path)
+
+    def evaluate_ml_walk_forward(self) -> Dict[str, Any]:
+        cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
+        samples_path = str(cfg.get("samples_path", "data/options_paper_samples.jsonl"))
+        return self._learner.walk_forward_evaluate(samples_path)
 
     def get_audit_log(self, limit: int = 100) -> Dict[str, Any]:
         safe_limit = max(1, min(1000, int(limit)))
@@ -1563,8 +1785,12 @@ class OptionsRuntime:
         try:
             open_h, open_m = map(int, self._market_open_time.split(":"))
             close_h, close_m = map(int, self._market_close_time.split(":"))
-            hm = (local.hour, local.minute)
-            return (open_h, open_m) <= hm <= (close_h, close_m)
+            session_cfg = self._config_engine.get_options_setting("options", "session_controls") or {}
+            open_buffer = int(session_cfg.get("open_buffer_minutes", 0))
+            close_buffer = int(session_cfg.get("close_buffer_minutes", 0))
+            open_dt = local.replace(hour=open_h, minute=open_m, second=0, microsecond=0) + timedelta(minutes=open_buffer)
+            close_dt = local.replace(hour=close_h, minute=close_m, second=0, microsecond=0) - timedelta(minutes=close_buffer)
+            return open_dt <= local <= close_dt
         except Exception:
             return True
 
@@ -1925,11 +2151,17 @@ class OptionsRuntime:
             "risk_limits": {
                 "max_trades_per_day": risk_cfg.get("max_trades_per_day"),
                 "max_loss_per_day": risk_cfg.get("max_loss_per_day"),
+                "options_risk_budget_cap": round(float((self._project_cfg.get("capital") or {}).get("options_risk_budget_pct_of_monthly", 0.6)) * float(self._get_monthly_capital() or 0.0), 2),
                 "drawdown_action": self._drawdown_action(),
                 "risk_state": dict(self._risk_state),
             },
             "no_trade_reason": summary.get("no_trade_reason"),
             "summary": summary,
+            "ml": {
+                "mode": str(self._ml_pipeline_cfg.get("mode", "gate")),
+                "drift_guard": dict(self._ml_drift_state),
+                "learner": self._learner.status(),
+            },
             "readiness": self.get_readiness_check(),
             "checks": checks,
         }
@@ -1994,6 +2226,7 @@ class OptionsRuntime:
             "circuit_breaker": all(not x.startswith("circuit_breaker:") for x in failed),
             "liquidity_volume": "liquidity_volume_too_low" not in failed and "liquidity_volume_missing" not in failed,
             "market_open": "market_closed" not in failed,
+            "data_quality": "missing_data_quality_score" not in failed and "data_quality_below_threshold" not in failed,
         }
 
     def initialize_monthly_capital(self, amount: float, month: Optional[str] = None) -> Dict[str, Any]:
@@ -2132,6 +2365,7 @@ class OptionsRuntime:
                 "last_signal_ts": {k: v.isoformat() for k, v in self._last_signal_ts.items()},
                 "processed_signal_keys": dict(self._processed_signal_keys),
                 "metrics": dict(self._metrics),
+                "ml_drift_state": dict(self._ml_drift_state),
             }
             self._runtime_state_file.parent.mkdir(parents=True, exist_ok=True)
             self._runtime_state_file.write_text(json.dumps(payload), encoding="utf-8")
@@ -2173,6 +2407,9 @@ class OptionsRuntime:
                         self._metrics[k] = float(v)
                     except Exception:
                         continue
+            drift = payload.get("ml_drift_state") or {}
+            if isinstance(drift, dict):
+                self._ml_drift_state = {"gate_blocked": bool(drift.get("gate_blocked", False)), "window": list(drift.get("window") or [])}
             self._metrics["state_loads"] = float(self._metrics.get("state_loads", 0)) + 1
             self._refresh_paper_state()
         except Exception as exc:
