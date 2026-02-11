@@ -9,6 +9,7 @@ from collections import deque
 from pathlib import Path
 import json
 import random
+import hashlib
 
 from app.domain.services.config_engine import ConfigEngine
 from app.infrastructure.market_data.options.subscription_manager import OptionsSubscriptionManager
@@ -96,6 +97,7 @@ class OptionsRuntime:
         self._promotion_cfg: Dict[str, Any] = {}
         self._ml_pipeline_cfg: Dict[str, Any] = {}
         self._runtime_state_file: Path = Path("data/options_runtime_state.json")
+        self._oi_snapshot_file: Path = Path("data/options_oi_snapshots.jsonl")
         self._audit_log: deque = deque(maxlen=500)
         self._metrics: Dict[str, float] = {
             "ticks_received": 0,
@@ -109,6 +111,7 @@ class OptionsRuntime:
             "state_loads": 0,
             "execution_duplicates_blocked": 0,
             "execution_precheck_blocked": 0,
+            "ml_samples_written": 0,
         }
         self._processed_signal_keys: Dict[str, str] = {}
         self._last_option_tick_ts: Dict[str, datetime] = {}
@@ -116,6 +119,7 @@ class OptionsRuntime:
         self._data_anomalies: Dict[str, deque] = {}
         self._ml_drift_state: Dict[str, Any] = {"gate_blocked": False, "window": []}
         self._capital_db_overrides: Dict[str, float] = {}
+        self._last_oi_snapshot_minute: Dict[str, str] = {}
 
     @staticmethod
     def _current_month_key() -> str:
@@ -156,6 +160,7 @@ class OptionsRuntime:
         self._promotion_cfg = options_cfg.get("promotion_gates", {}) or {}
         self._ml_pipeline_cfg = options_cfg.get("ml_pipeline", {}) or {}
         self._runtime_state_file = Path(str(self._ops_cfg.get("runtime_state_file", "data/options_runtime_state.json")))
+        self._oi_snapshot_file = Path(str(self._ops_cfg.get("oi_snapshot_file", "data/options_oi_snapshots.jsonl")))
         md_cfg = options_cfg.get("market_data", {}) or {}
         self._paper_cfg = options_cfg.get("paper_trading", {}) or {}
         market_cfg = options_cfg.get("market", {}) or {}
@@ -346,6 +351,29 @@ class OptionsRuntime:
             self._maybe_end_of_day(ts)
         return None
 
+    def _config_fingerprint(self) -> Dict[str, Any]:
+        try:
+            payload = {
+                "strategy": self._strategy_cfg,
+                "project": self._project_cfg,
+                "execution": self._execution_cfg,
+                "data_quality": self._data_quality_cfg,
+                "paper_trading": self._paper_cfg,
+            }
+            serialized = json.dumps(payload, sort_keys=True, default=str)
+            digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+            return {
+                "options_config_sha256": digest,
+                "feature_version": str(self._ml_pipeline_cfg.get("feature_version", "v1")),
+                "strategy_version": str(getattr(self._config_engine, "strategy_version", "unknown")),
+            }
+        except Exception:
+            return {
+                "options_config_sha256": None,
+                "feature_version": str(self._ml_pipeline_cfg.get("feature_version", "v1")),
+                "strategy_version": str(getattr(self._config_engine, "strategy_version", "unknown")),
+            }
+
     def _record_audit(self, event_type: str, payload: Dict[str, Any]) -> None:
         self._audit_log.append(
             {
@@ -404,6 +432,7 @@ class OptionsRuntime:
             "realtime_enabled": bool(self._realtime_runtime and self._realtime_runtime.is_enabled()),
             "tick_subscribers": self._realtime_runtime.subscriber_count("tick") if self._realtime_runtime else 0,
             "last_tick": self._last_tick,
+            "config_fingerprint": self._config_fingerprint(),
         }
 
     def get_market_state(self) -> MarketState:
@@ -450,7 +479,7 @@ class OptionsRuntime:
         data_quality_score = self._compute_data_quality_score(symbol, spread_ce_pct, spread_pe_pct)
         flat_threshold = float(self._config_engine.get_options_setting("options", "risk", "flat_atr_threshold"))
         regime = "Trending" if atr is not None and float(atr) >= flat_threshold else "Range"
-        return {
+        indicator = {
             "ts": history[-1].ts.isoformat(),
             "open": history[-1].open,
             "high": history[-1].high,
@@ -482,6 +511,34 @@ class OptionsRuntime:
             "macd_hist": macd_hist,
             "boll_pos": boll_pos,
         }
+        self._persist_oi_snapshot(symbol, indicator)
+        return indicator
+
+    def _persist_oi_snapshot(self, symbol: str, indicator: Dict[str, Any]) -> None:
+        ts_value = indicator.get("ts")
+        if not ts_value:
+            return
+        minute_key = str(ts_value)[:16]
+        if self._last_oi_snapshot_minute.get(symbol) == minute_key:
+            return
+        payload = {
+            "ts": ts_value,
+            "symbol": symbol,
+            "oi_change_ce": indicator.get("oi_change_ce"),
+            "oi_change_pe": indicator.get("oi_change_pe"),
+            "oi_change_total": indicator.get("oi_change"),
+            "iv_change": indicator.get("iv_change"),
+            "futures_oi_change": indicator.get("futures_oi_change"),
+            "close_5m": indicator.get("close_5m"),
+            "vwap_5m": indicator.get("vwap_5m"),
+        }
+        try:
+            self._oi_snapshot_file.parent.mkdir(parents=True, exist_ok=True)
+            with self._oi_snapshot_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload) + "\n")
+            self._last_oi_snapshot_minute[symbol] = minute_key
+        except Exception:
+            return
 
     def _compute_data_quality_score(
         self,
@@ -1540,6 +1597,7 @@ class OptionsRuntime:
             sample_path.parent.mkdir(parents=True, exist_ok=True)
             with sample_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload) + "\n")
+            self._metrics["ml_samples_written"] = float(self._metrics.get("ml_samples_written", 0)) + 1
         except Exception:
             return
 
@@ -1722,14 +1780,29 @@ class OptionsRuntime:
         }
 
     def get_metrics(self) -> Dict[str, Any]:
+        closed = [t for t in self._paper_trades if t.get("type") == "close"]
+        open_trades = [t for t in self._paper_trades if t.get("type") == "open"]
+        avg_entry_slippage = 0.0
+        avg_fill_ratio = 0.0
+        if open_trades:
+            avg_entry_slippage = sum(float(t.get("entry_slippage_pct") or 0.0) for t in open_trades) / max(len(open_trades), 1)
+            avg_fill_ratio = sum(float(t.get("fill_ratio") or 0.0) for t in open_trades) / max(len(open_trades), 1)
+        execution_quality = {
+            "closed_trades": len(closed),
+            "avg_entry_slippage_pct": round(avg_entry_slippage, 3),
+            "avg_fill_ratio": round(avg_fill_ratio, 3),
+            "rejected_fills": sum(1 for item in self._audit_log if item.get("event") == "paper_trade_rejected_fill"),
+        }
         return {
             "enabled": self._enabled,
             "execution_mode": str(self._execution_cfg.get("mode", "paper")),
             "metrics": dict(self._metrics),
             "ml_mode": str(self._ml_pipeline_cfg.get("mode", "gate")),
             "ml_drift_guard": dict(self._ml_drift_state),
+            "execution_quality": execution_quality,
             "open_positions": len(self._paper_positions),
             "audit_events": len(self._audit_log),
+            "config_fingerprint": self._config_fingerprint(),
         }
 
     def train_ml_from_samples(self) -> Dict[str, Any]:
@@ -1742,6 +1815,24 @@ class OptionsRuntime:
         samples_path = str(cfg.get("samples_path", "data/options_paper_samples.jsonl"))
         return self._learner.walk_forward_evaluate(samples_path)
 
+    def get_ml_samples_status(self) -> Dict[str, Any]:
+        cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
+        samples_path = str(cfg.get("samples_path", "data/options_paper_samples.jsonl"))
+        path = Path(samples_path)
+        count = 0
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    count = sum(1 for _ in f)
+            except Exception:
+                count = 0
+        return {
+            "enabled": self._enabled,
+            "samples_path": samples_path,
+            "samples_count": count,
+            "learner": self._learner.status(),
+        }
+
     def get_audit_log(self, limit: int = 100) -> Dict[str, Any]:
         safe_limit = max(1, min(1000, int(limit)))
         items = list(self._audit_log)[-safe_limit:]
@@ -1749,6 +1840,27 @@ class OptionsRuntime:
             "enabled": self._enabled,
             "count": len(items),
             "items": items,
+        }
+
+    def get_reconciliation_summary(self, day: Optional[str] = None) -> Dict[str, Any]:
+        target_day = day or datetime.now(IST).date().isoformat()
+        closed = [t for t in self._paper_trades if t.get("type") == "close" and str(t.get("exit_ts", "")).startswith(target_day)]
+        gross = round(sum(float(t.get("gross_pnl", 0.0)) for t in closed), 2)
+        costs = round(sum(float(t.get("costs", 0.0)) for t in closed), 2)
+        net = round(sum(float(t.get("realized_pnl", 0.0)) for t in closed), 2)
+        wins = sum(1 for t in closed if float(t.get("realized_pnl", 0.0)) > 0)
+        losses = len(closed) - wins
+        return {
+            "enabled": self._enabled,
+            "date": target_day,
+            "execution_mode": str(self._execution_cfg.get("mode", "paper")),
+            "closed_trades": len(closed),
+            "wins": wins,
+            "losses": losses,
+            "gross_pnl": gross,
+            "costs": costs,
+            "net_pnl": net,
+            "open_positions": len(self._paper_positions),
         }
 
     def get_readiness_check(self) -> Dict[str, Any]:
@@ -2189,6 +2301,7 @@ class OptionsRuntime:
                 "drift_guard": dict(self._ml_drift_state),
                 "learner": self._learner.status(),
             },
+            "config_fingerprint": self._config_fingerprint(),
             "readiness": self.get_readiness_check(),
             "checks": checks,
         }

@@ -139,6 +139,7 @@ options:
   operations:
     persist_runtime_state: true
     runtime_state_file: data/options_runtime_state.json
+    oi_snapshot_file: data/options_oi_snapshots.jsonl
   promotion_gates:
     min_closed_trades: 50
     min_win_rate_pct: 45.0

@@ -65,12 +65,17 @@ class UpstoxStreamClient:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
+            sleep_s = self._reconnect_delay
             try:
                 await self._connect_once()
             except Exception as exc:
                 logger.warning("Upstox stream error: %s", exc)
+                msg = str(exc).lower()
+                if "401" in msg or "unauthor" in msg:
+                    await self._emit_status({"status": "unauthorized_401"})
+                    sleep_s = max(30, self._reconnect_delay)
             if not self._stop_event.is_set():
-                await asyncio.sleep(self._reconnect_delay)
+                await asyncio.sleep(sleep_s)
 
     async def _connect_once(self) -> None:
         token = await self._token_provider()

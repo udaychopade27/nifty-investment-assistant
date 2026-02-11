@@ -71,7 +71,16 @@ const Badge = ({ children, variant = 'default' }) => {
 class APIService {
   static async get(endpoint) {
     const response = await fetch(`${API_BASE_URL}${endpoint}`);
-    if (!response.ok) throw new Error('API request failed');
+    if (!response.ok) {
+      let message = `GET ${endpoint} failed (${response.status})`;
+      try {
+        const error = await response.json();
+        message = error.detail || error.message || message;
+      } catch (_) {
+        // ignore json parse errors
+      }
+      throw new Error(message);
+    }
     return response.json();
   }
   
@@ -82,8 +91,14 @@ class APIService {
       body: JSON.stringify(data)
     });
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || 'API request failed');
+      let message = `POST ${endpoint} failed (${response.status})`;
+      try {
+        const error = await response.json();
+        message = error.detail || error.message || message;
+      } catch (_) {
+        // ignore json parse errors
+      }
+      throw new Error(message);
     }
     return response.json();
   }
@@ -176,6 +191,14 @@ class APIService {
 
   static getOptionsState() {
     return this.get('/api/v1/options/state');
+  }
+
+  static getOptionsGoLive() {
+    return this.get('/api/v1/options/go-live');
+  }
+
+  static notifyRecentOptionsSignals() {
+    return this.post('/api/v1/options/notify-recent-signals', {});
   }
 
   static setOptionsCapital(monthlyCapital, month = null) {
@@ -711,7 +734,77 @@ const OptionsTradingOverview = ({ projectCheck, onInitCapital, onTopupCapital })
   );
 };
 
-const OptionsSignalsCard = ({ optionsState }) => {
+const OptionsGoLiveCard = ({ goLive, onRefresh }) => {
+  if (!goLive) {
+    return (
+      <Card className="p-6">
+        <div className="text-center py-6 text-ink-1/60">Go-live checklist unavailable.</div>
+      </Card>
+    );
+  }
+
+  const checklist = Array.isArray(goLive.checklist) ? goLive.checklist : [];
+  const canEnable = Boolean(goLive.can_enable_live_mode);
+  const canStartNow = Boolean(goLive.can_start_live_now);
+
+  const renderValue = (value) => {
+    if (value === null || value === undefined) return '-';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  };
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-semibold text-ink-0">Go-Live Readiness</h2>
+        <Button variant="secondary" size="sm" onClick={onRefresh}>
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-4 text-sm">
+        <div className="bg-stone-50 p-3 rounded-lg">
+          <div className="text-ink-1/60">Enable Live Mode</div>
+          <Badge variant={canEnable ? 'success' : 'danger'}>{canEnable ? 'YES' : 'NO'}</Badge>
+        </div>
+        <div className="bg-stone-50 p-3 rounded-lg">
+          <div className="text-ink-1/60">Start Live Now</div>
+          <Badge variant={canStartNow ? 'success' : 'warning'}>{canStartNow ? 'YES' : 'NO'}</Badge>
+        </div>
+      </div>
+
+      <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+        {checklist.length === 0 && (
+          <div className="text-sm text-ink-1/60">No checklist items.</div>
+        )}
+        {checklist.map((item, idx) => (
+          <div key={`${item.name || 'item'}-${idx}`} className="border border-[var(--line)] rounded-lg p-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-ink-0">{item.name || 'Check'}</span>
+              <Badge variant={item.pass ? 'success' : 'danger'}>{item.pass ? 'PASS' : 'FAIL'}</Badge>
+            </div>
+            <div className="text-xs text-ink-1/70 mt-1">Endpoint: {item.endpoint || '-'}</div>
+            <div className="text-xs text-ink-1/70 mt-1">Value: {renderValue(item.value)}</div>
+            {item.required !== undefined && (
+              <div className="text-xs text-ink-1/70 mt-1">Required: {item.required}</div>
+            )}
+            {item.required_max !== undefined && (
+              <div className="text-xs text-ink-1/70 mt-1">Required Max: {item.required_max}</div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {goLive.next_action && (
+        <div className="mt-4 bg-sky-50 border border-sky-100 rounded-lg p-3 text-xs text-sky-900">
+          {goLive.next_action}
+        </div>
+      )}
+    </Card>
+  );
+};
+
+const OptionsSignalsCard = ({ optionsState, onNotify }) => {
   if (!optionsState) {
     return (
       <Card className="p-6">
@@ -727,7 +820,12 @@ const OptionsSignalsCard = ({ optionsState }) => {
     <Card className="p-6">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-ink-0">Recent Options Signals</h2>
-        <Badge variant="info">{allSignals.length}</Badge>
+        <div className="flex items-center space-x-2">
+          <Badge variant="info">{allSignals.length}</Badge>
+          <Button variant="secondary" size="sm" onClick={onNotify}>
+            Send
+          </Button>
+        </div>
       </div>
       <div className="space-y-2 text-sm max-h-72 overflow-y-auto pr-1">
         {allSignals.length === 0 && (
@@ -1498,6 +1596,7 @@ const ETFDashboard = () => {
   const [marketDataTrace, setMarketDataTrace] = useState(null);
   const [optionsProjectCheck, setOptionsProjectCheck] = useState(null);
   const [optionsState, setOptionsState] = useState(null);
+  const [optionsGoLive, setOptionsGoLive] = useState(null);
   const [showCapitalModal, setShowCapitalModal] = useState(false);
   const [showBasePlanModal, setShowBasePlanModal] = useState(false);
   const [showTokenModal, setShowTokenModal] = useState(false);
@@ -1517,7 +1616,7 @@ const ETFDashboard = () => {
   const loadDashboardData = async () => {
     setLoading(true);
     try {
-      const [capitalData, portfolioData, brokerData, historyData, marketStatus, marketTrace, projectCheckData, optionsStateData] = await Promise.all([
+      const [capitalData, portfolioData, brokerData, historyData, marketStatus, marketTrace, projectCheckData, optionsStateData, optionsGoLiveData] = await Promise.all([
         APIService.getCapital().catch(() => null),
         APIService.getPnl().catch(() => null),
         APIService.getBrokerHoldings().catch(() => null),
@@ -1525,7 +1624,8 @@ const ETFDashboard = () => {
         APIService.getMarketDataStatus().catch(() => null),
         APIService.getMarketDataTrace().catch(() => null),
         APIService.getOptionsProjectCheck().catch(() => null),
-        APIService.getOptionsState().catch(() => null)
+        APIService.getOptionsState().catch(() => null),
+        APIService.getOptionsGoLive().catch(() => null)
       ]);
       
       setCapital(capitalData);
@@ -1539,6 +1639,7 @@ const ETFDashboard = () => {
       setMarketDataTrace(marketTrace);
       setOptionsProjectCheck(projectCheckData);
       setOptionsState(optionsStateData);
+      setOptionsGoLive(optionsGoLiveData);
       
       // Load decision
       try {
@@ -1551,6 +1652,21 @@ const ETFDashboard = () => {
       console.error('Failed to load dashboard data:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const refreshOptionsStatus = async () => {
+    try {
+      const [projectCheckData, optionsStateData, optionsGoLiveData] = await Promise.all([
+        APIService.getOptionsProjectCheck().catch(() => null),
+        APIService.getOptionsState().catch(() => null),
+        APIService.getOptionsGoLive().catch(() => null),
+      ]);
+      setOptionsProjectCheck(projectCheckData);
+      setOptionsState(optionsStateData);
+      setOptionsGoLive(optionsGoLiveData);
+    } catch (error) {
+      console.error('Failed to refresh options status:', error);
     }
   };
 
@@ -1569,8 +1685,7 @@ const ETFDashboard = () => {
     }
     try {
       await APIService.setOptionsCapital(amount);
-      const projectCheckData = await APIService.getOptionsProjectCheck().catch(() => null);
-      setOptionsProjectCheck(projectCheckData);
+      await refreshOptionsStatus();
     } catch (error) {
       alert(error.message || 'Failed to initialize options capital.');
     }
@@ -1586,10 +1701,19 @@ const ETFDashboard = () => {
     }
     try {
       await APIService.topupOptionsCapital(amount);
-      const projectCheckData = await APIService.getOptionsProjectCheck().catch(() => null);
-      setOptionsProjectCheck(projectCheckData);
+      await refreshOptionsStatus();
     } catch (error) {
       alert(error.message || 'Failed to top-up options capital.');
+    }
+  };
+
+  const handleNotifyOptionsSignals = async () => {
+    try {
+      const result = await APIService.notifyRecentOptionsSignals();
+      const count = Number(result?.count || 0);
+      alert(count > 0 ? `Sent ${count} recent signals to Telegram.` : 'Sent "No signals yet" status to Telegram.');
+    } catch (error) {
+      alert(error.message || 'Failed to send signal status.');
     }
   };
   
@@ -1757,6 +1881,7 @@ const ETFDashboard = () => {
             <CombinedPortfolioSummary appPortfolio={portfolio} brokerPortfolio={brokerPortfolio} />
             <PortfolioSummary portfolio={portfolio} />
             <BrokerHoldingsCard broker={brokerPortfolio} lastSyncedAt={brokerSyncedAt} />
+            <OptionsSignalsCard optionsState={optionsState} onNotify={handleNotifyOptionsSignals} />
           </div>
           
           {/* Right Column - Capital & Portfolio */}
@@ -1779,7 +1904,10 @@ const ETFDashboard = () => {
               onInitCapital={handleInitOptionsCapital}
               onTopupCapital={handleTopupOptionsCapital}
             />
-            <OptionsSignalsCard optionsState={optionsState} />
+            <OptionsGoLiveCard
+              goLive={optionsGoLive}
+              onRefresh={refreshOptionsStatus}
+            />
           </div>
         </div>
       </div>

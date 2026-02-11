@@ -74,6 +74,31 @@ class InvestmentResponse(BaseModel):
     decision_linked: bool
 
 
+async def _resolve_active_tactical_decision(
+    decision_repo: DailyDecisionRepository,
+    as_of: date,
+):
+    """
+    Tactical decision selection rules:
+    1. If today's decision exists:
+       - decision != NONE -> use it
+       - decision == NONE -> block (new decision already generated)
+    2. If today's decision does not exist yet:
+       - fallback to latest previous decision with decision != NONE (T+1 support)
+    """
+    today_decision = await decision_repo.get_today()
+    if today_decision:
+        if today_decision.decision_type.value == "NONE":
+            return None, "today_none_block"
+        return today_decision, "today"
+
+    recent = await decision_repo.get_recent(limit=10)
+    for decision in recent:
+        if decision.date <= as_of and decision.decision_type.value != "NONE":
+            return decision, "carry_forward"
+    return None, "missing_decision"
+
+
 # ------------------------------------------------------------------
 # BASE INVESTMENT
 # ------------------------------------------------------------------
@@ -259,20 +284,18 @@ async def execute_tactical_investment(
             detail="❌ Monthly capital not configured. Set capital before investing.",
         )
 
-    # 2️⃣ Decision must exist
+    # 2️⃣ Decision must exist (today OR latest carry-forward until today's decision is generated)
     decision_repo = DailyDecisionRepository(db)
-    daily_decision = await decision_repo.get_today()
-
-    if not daily_decision:
-        raise HTTPException(
-            status_code=400,
-            detail=f"❌ No decision for {today}. Tactical investment not allowed.",
-        )
-
-    if daily_decision.decision_type.value == "NONE":
+    daily_decision, decision_source = await _resolve_active_tactical_decision(decision_repo, today)
+    if decision_source == "today_none_block":
         raise HTTPException(
             status_code=400,
             detail="❌ Today's decision is NONE. Tactical investment blocked.",
+        )
+    if not daily_decision:
+        raise HTTPException(
+            status_code=400,
+            detail=f"❌ No tactical decision available as of {today}.",
         )
 
     # 3️⃣ Ensure ETF decision exists + idempotent per decision
@@ -284,7 +307,7 @@ async def execute_tactical_investment(
     if not etf_decision:
         raise HTTPException(
             status_code=400,
-            detail=f"❌ No ETF decision for {request.etf_symbol} today",
+            detail=f"❌ No ETF decision for {request.etf_symbol} on {daily_decision.date}",
         )
 
     existing = await db.execute(
@@ -322,7 +345,11 @@ async def execute_tactical_investment(
         )
 
     # 5️⃣ Record investment
-    execution_notes = request.notes or f"Tactical investment (Decision: {daily_decision.decision_type.value})"
+    source_tag = "today" if decision_source == "today" else "carry_forward"
+    execution_notes = request.notes or (
+        f"Tactical investment (Decision: {daily_decision.decision_type.value}, "
+        f"Date: {daily_decision.date}, Source: {source_tag})"
+    )
     if settings.SIMULATION_ONLY:
         execution_notes = f"SIMULATION | {execution_notes}"
     try:
@@ -351,7 +378,12 @@ async def execute_tactical_investment(
     await db.refresh(investment)
 
     logger.info(
-        f"✅ TACTICAL investment: {request.etf_symbol} x {request.units} ({daily_decision.decision_type.value})"
+        "✅ TACTICAL investment: %s x %s (%s | decision_date=%s | source=%s)",
+        request.etf_symbol,
+        request.units,
+        daily_decision.decision_type.value,
+        daily_decision.date,
+        decision_source,
     )
 
     return InvestmentResponse(
@@ -446,13 +478,18 @@ async def check_today_investment_types(db: AsyncSession = Depends(get_db)):
     }
 
     decision_repo = DailyDecisionRepository(db)
-    decision = await decision_repo.get_today()
-
-    if decision and decision.decision_type.value != "NONE":
+    decision, source = await _resolve_active_tactical_decision(decision_repo, today)
+    if decision:
         allowed["tactical"] = {
             "allowed": True,
-            "reason": f"Decision: {decision.decision_type.value}",
+            "reason": f"Decision: {decision.decision_type.value} ({source})",
             "suggested_amount": float(decision.suggested_total_amount),
+            "decision_date": str(decision.date),
+        }
+    elif source == "today_none_block":
+        allowed["tactical"] = {
+            "allowed": False,
+            "reason": "Today's decision is NONE",
         }
 
     return allowed

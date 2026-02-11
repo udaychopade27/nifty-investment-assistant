@@ -14,6 +14,10 @@ from app.infrastructure.repositories.options.signal_repository import OptionsSig
 from app.infrastructure.repositories.options.capital_repository import OptionsCapitalRepository
 from app.infrastructure.market_data.options.chain_resolver import OptionsChainResolver
 from app.utils.time import IST
+from app.domain.services.api_token_service import ApiTokenService
+from app.config import settings
+import httpx
+from app.utils.notifications import send_tiered_telegram_message
 
 router = APIRouter()
 
@@ -38,6 +42,40 @@ class OptionsReplayRequest(BaseModel):
     symbol: str = Field(..., description="Underlying symbol, e.g. NIFTY 50")
     force_direction: str | None = Field(default=None, description="Optional BUY_CE or BUY_PE for directional replay")
     indicator: dict | None = Field(default=None, description="Optional indicator payload override for dry-run replay")
+
+
+async def _token_precheck_payload() -> dict:
+    token_service = ApiTokenService("upstox")
+    status = await token_service.get_status()
+    token = await token_service.get_token()
+    if not token:
+        return {
+            "ok": False,
+            "reason": "token_missing",
+            "token_status": status.__dict__,
+            "feed_url_check": None,
+        }
+    feed_url = settings.UPSTOX_FEED_URL or "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(feed_url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+        ok = resp.status_code == 200
+        return {
+            "ok": ok,
+            "reason": None if ok else f"feed_url_http_{resp.status_code}",
+            "token_status": status.__dict__,
+            "feed_url_check": {
+                "url": feed_url,
+                "status_code": resp.status_code,
+            },
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "feed_url_request_failed",
+            "token_status": status.__dict__,
+            "feed_url_check": {"url": feed_url, "error": str(exc)},
+        }
 
 
 @router.get("/health")
@@ -147,6 +185,14 @@ async def options_ml_evaluate(request: Request):
     return runtime.evaluate_ml_walk_forward()
 
 
+@router.get("/ml/samples")
+async def options_ml_samples(request: Request):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {"enabled": False, "samples_path": None, "samples_count": 0}
+    return runtime.get_ml_samples_status()
+
+
 @router.get("/walk-forward")
 async def options_walk_forward(
     request: Request,
@@ -157,6 +203,133 @@ async def options_walk_forward(
     if not runtime:
         return {"enabled": False, "closed_trades": 0}
     return runtime.get_walk_forward_summary(date_from=date_from, date_to=date_to)
+
+
+@router.get("/reconciliation")
+async def options_reconciliation(request: Request, day: str | None = None):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {"enabled": False, "closed_trades": 0}
+    return runtime.get_reconciliation_summary(day=day)
+
+
+@router.get("/token-precheck")
+async def options_token_precheck():
+    return await _token_precheck_payload()
+
+
+@router.get("/go-live")
+async def options_go_live(request: Request):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        return {
+            "enabled": False,
+            "can_enable_live_mode": False,
+            "can_start_live_now": False,
+            "reason": "options_runtime_unavailable",
+            "checklist": [],
+        }
+
+    readiness = runtime.get_readiness_check()
+    project = runtime.get_project_check()
+    metrics = runtime.get_metrics()
+    token_precheck = await _token_precheck_payload()
+    health = runtime.get_status()
+
+    readiness_checks = readiness.get("checks", {}) if isinstance(readiness, dict) else {}
+    closed_trades = (readiness_checks.get("closed_trades") or {}).get("pass", False)
+    win_rate = (readiness_checks.get("win_rate_pct") or {}).get("pass", False)
+    drawdown = (readiness_checks.get("drawdown_pct") or {}).get("pass", False)
+    data_fresh = (readiness_checks.get("data_feed_fresh") or {}).get("pass", False)
+    market_open = bool((readiness_checks.get("market_open_now") or {}).get("pass", False))
+    event_window_clear = bool((readiness_checks.get("major_event_window_clear") or {}).get("pass", False))
+    realtime_enabled = bool(health.get("realtime_enabled", False))
+
+    checklist = [
+        {
+            "name": "Token precheck",
+            "pass": bool(token_precheck.get("ok", False)),
+            "endpoint": "/api/v1/options/token-precheck",
+            "value": token_precheck.get("reason") or "ok",
+        },
+        {
+            "name": "Realtime runtime enabled",
+            "pass": realtime_enabled,
+            "endpoint": "/api/v1/options/health",
+            "value": health.get("realtime_enabled"),
+        },
+        {
+            "name": "Data feed fresh",
+            "pass": data_fresh,
+            "endpoint": "/api/v1/options/readiness",
+            "value": (readiness_checks.get("data_feed_fresh") or {}).get("value"),
+        },
+        {
+            "name": "Closed trades threshold",
+            "pass": bool(closed_trades),
+            "endpoint": "/api/v1/options/readiness",
+            "value": (readiness_checks.get("closed_trades") or {}).get("value"),
+            "required": (readiness_checks.get("closed_trades") or {}).get("min_required"),
+        },
+        {
+            "name": "Win rate threshold",
+            "pass": bool(win_rate),
+            "endpoint": "/api/v1/options/readiness",
+            "value": (readiness_checks.get("win_rate_pct") or {}).get("value"),
+            "required": (readiness_checks.get("win_rate_pct") or {}).get("min_required"),
+        },
+        {
+            "name": "Drawdown within limit",
+            "pass": bool(drawdown),
+            "endpoint": "/api/v1/options/readiness",
+            "value": (readiness_checks.get("drawdown_pct") or {}).get("value"),
+            "required_max": (readiness_checks.get("drawdown_pct") or {}).get("max_allowed"),
+        },
+        {
+            "name": "Major event window clear",
+            "pass": bool(event_window_clear),
+            "endpoint": "/api/v1/options/readiness",
+            "value": (readiness_checks.get("major_event_window_clear") or {}).get("value"),
+        },
+        {
+            "name": "Market open now",
+            "pass": bool(market_open),
+            "endpoint": "/api/v1/options/readiness",
+            "value": (readiness_checks.get("market_open_now") or {}).get("value"),
+        },
+    ]
+
+    can_enable_live_mode = all(
+        [
+            bool(token_precheck.get("ok", False)),
+            realtime_enabled,
+            data_fresh,
+            bool(closed_trades),
+            bool(win_rate),
+            bool(drawdown),
+            bool(event_window_clear),
+        ]
+    )
+    can_start_live_now = bool(can_enable_live_mode and market_open)
+
+    return {
+        "enabled": True,
+        "execution_mode": project.get("execution_mode", "paper"),
+        "can_enable_live_mode": can_enable_live_mode,
+        "can_start_live_now": can_start_live_now,
+        "readiness_ready_for_live": bool(readiness.get("ready_for_live", False)),
+        "project_no_trade_reason": project.get("no_trade_reason"),
+        "metrics_summary": {
+            "signals_generated": (metrics.get("metrics") or {}).get("signals_generated", 0),
+            "signals_executed": (metrics.get("metrics") or {}).get("signals_executed", 0),
+            "signals_blocked": (metrics.get("metrics") or {}).get("signals_blocked", 0),
+            "open_positions": metrics.get("open_positions", 0),
+        },
+        "checklist": checklist,
+        "next_action": (
+            "Switch to live only when can_enable_live_mode=true. Start live session when can_start_live_now=true."
+        ),
+    }
 
 
 @router.get("/signals")
@@ -174,6 +347,46 @@ async def options_signals(
     repo = OptionsSignalRepository(db)
     items = await repo.get_by_date(signal_date, limit=limit)
     return {"date": signal_date.isoformat(), "count": len(items), "items": items}
+
+
+@router.post("/notify-recent-signals")
+async def options_notify_recent_signals(request: Request):
+    runtime = getattr(request.app.state, "options_runtime", None)
+    if not runtime:
+        raise HTTPException(status_code=400, detail="Options runtime not available")
+
+    state = runtime.get_market_state()
+    signals_map = state.signals or {}
+    all_signals = []
+    for items in signals_map.values():
+        if isinstance(items, list):
+            all_signals.extend(items)
+    all_signals = all_signals[-8:]
+
+    if not all_signals:
+        project = runtime.get_project_check()
+        reason = ((project.get("summary") or {}).get("no_trade_reason")) or project.get("no_trade_reason") or "NO_SIGNALS"
+        await send_tiered_telegram_message(
+            tier="INFO",
+            title="Recent Options Signals",
+            body=f"Count: 0\nStatus: No signals yet.\nReason: {reason}",
+        )
+        return {"sent": True, "count": 0, "reason": reason}
+
+    lines = []
+    for row in reversed(all_signals):
+        symbol = row.get("symbol", "-")
+        sig = row.get("signal", "-")
+        entry = row.get("entry", "-")
+        score = row.get("confidence_project", row.get("confidence_score", "-"))
+        lines.append(f"{symbol} {sig} | Entry: {entry} | Score: {score}")
+    body = "Count: {}\n{}".format(len(all_signals), "\n".join(lines))
+    await send_tiered_telegram_message(
+        tier="INFO",
+        title="Recent Options Signals",
+        body=body,
+    )
+    return {"sent": True, "count": len(all_signals)}
 
 
 @router.post("/force-signal")

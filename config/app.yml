@@ -135,6 +135,8 @@ realtime:
     feed_url: 'https://api.upstox.com/v3/feed/market-data-feed/authorize'
     reconnect_delay: 5
     heartbeat_seconds: 20
+    disconnect_alert_cooldown_seconds: 600
+    stale_alert_cooldown_seconds: 600
     market_hours_only: true
     monitor_outside_market_hours: false
   redis:

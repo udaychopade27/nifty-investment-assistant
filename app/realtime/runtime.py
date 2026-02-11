@@ -48,6 +48,10 @@ class RealtimeRuntime:
         self._monitor_task: Optional[asyncio.Task] = None
         self._stale_alert_sent: bool = False
         self._disconnect_alert_sent: bool = False
+        self._disconnect_alert_cooldown_seconds: int = 600
+        self._stale_alert_cooldown_seconds: int = 600
+        self._last_disconnect_alert_at: Optional[datetime] = None
+        self._last_stale_alert_at: Optional[datetime] = None
         self._runtime_cfg: Dict[str, object] = {}
         self._market_hours_only: bool = False
         self._monitor_outside_market_hours: bool = False
@@ -107,6 +111,8 @@ class RealtimeRuntime:
         if not enabled:
             return
         self._stale_threshold_seconds = int((cfg.get("upstox_stream", {}) or {}).get("stale_tick_seconds", 90))
+        self._disconnect_alert_cooldown_seconds = int((cfg.get("upstox_stream", {}) or {}).get("disconnect_alert_cooldown_seconds", 600))
+        self._stale_alert_cooldown_seconds = int((cfg.get("upstox_stream", {}) or {}).get("stale_alert_cooldown_seconds", 600))
         self._market_hours_only = bool((cfg.get("upstox_stream", {}) or {}).get("market_hours_only", False))
         self._monitor_outside_market_hours = bool(
             (cfg.get("upstox_stream", {}) or {}).get("monitor_outside_market_hours", False)
@@ -242,7 +248,10 @@ class RealtimeRuntime:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(feed_url, headers=headers)
             if resp.status_code != 200:
-                self._status["last_status"] = f"feed_url_error:{resp.status_code}"
+                if resp.status_code == 401:
+                    self._status["last_status"] = {"status": "token_unauthorized", "code": 401}
+                else:
+                    self._status["last_status"] = f"feed_url_error:{resp.status_code}"
                 logger.warning(
                     "Upstox WS fetch failed: status=%s body=%s",
                     resp.status_code,
@@ -440,8 +449,13 @@ class RealtimeRuntime:
                 continue
             now = datetime.now(tz=timezone.utc)
             if not self._status.get("connected"):
-                if not self._disconnect_alert_sent:
+                can_alert = (
+                    self._last_disconnect_alert_at is None
+                    or (now - self._last_disconnect_alert_at).total_seconds() >= self._disconnect_alert_cooldown_seconds
+                )
+                if (not self._disconnect_alert_sent) and can_alert:
                     self._disconnect_alert_sent = True
+                    self._last_disconnect_alert_at = now
                     await send_tiered_telegram_message(
                         tier="INFO",
                         title="Market Feed Disconnected",
@@ -451,8 +465,13 @@ class RealtimeRuntime:
             if self._last_tick_at is None:
                 continue
             stale_for = int((now - self._last_tick_at).total_seconds())
-            if stale_for > self._stale_threshold_seconds and not self._stale_alert_sent:
+            can_stale_alert = (
+                self._last_stale_alert_at is None
+                or (now - self._last_stale_alert_at).total_seconds() >= self._stale_alert_cooldown_seconds
+            )
+            if stale_for > self._stale_threshold_seconds and not self._stale_alert_sent and can_stale_alert:
                 self._stale_alert_sent = True
+                self._last_stale_alert_at = now
                 await send_tiered_telegram_message(
                     tier="BLOCKED",
                     title="Market Feed Stale",
