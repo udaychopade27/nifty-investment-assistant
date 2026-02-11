@@ -248,7 +248,6 @@ app.add_middleware(
 
 
 # Health check endpoint
-@app.get("/health")
 @app.get("/api/v1/health")
 async def health_check():
     """Comprehensive health check"""
@@ -306,7 +305,6 @@ async def health_check():
     }
 
 
-@app.get("/health/market")
 @app.get("/api/v1/health/market")
 async def market_health():
     """Realtime market data health."""
