@@ -64,6 +64,10 @@ class RealtimeRuntime:
             "connected": False,
             "last_status": None,
         }
+        
+        # Throttling state
+        self._last_redis_write: Dict[str, datetime] = {}
+        self._last_redis_price: Dict[str, Decimal] = {}
 
     def _get_config(self) -> Dict[str, object]:
         app_cfg = self._config_engine.get_app_setting("realtime")
@@ -274,11 +278,47 @@ class RealtimeRuntime:
             logger.warning("Upstox WS fetch failed: %s", exc)
             return None
 
+    def _should_update_redis(self, symbol: str, price: Decimal, ts: datetime, force: bool = False) -> bool:
+        if force:
+            return True
+        
+        # 1. Check time throttle (1 second)
+        last_write = self._last_redis_write.get(symbol)
+        now = datetime.now(tz=timezone.utc)
+        if last_write and (now - last_write).total_seconds() < 1.0:
+            # 2. Check price deviation if time throttle is active
+            # Write if price changed by > 0.05% (configurable, hardcoded for efficiency) since last write
+            last_price = self._last_redis_price.get(symbol)
+            if last_price:
+                try:
+                    pct_change = abs((price - last_price) / last_price)
+                    if pct_change < Decimal("0.0005"):  # 0.05%
+                        return False
+                except Exception:
+                    pass
+        
+        return True
+
+    async def force_flush(self, symbol: str) -> None:
+        """Force immediate Redis update for a symbol (bypass throttle)."""
+        if not self._quote_store:
+            return
+        
+        last_tick = self._quote_store.get_last_tick(symbol)
+        if last_tick:
+            price = last_tick.get("price")
+            ts = last_tick.get("ts")
+            if price and ts:
+                await self._write_tick_cache(symbol, Decimal(str(price)), ts, force=True)
+
     async def _handle_tick(self, instrument_key: str, price: Decimal, ts: datetime) -> None:
         if not self._quote_store:
             return
         symbol = self._key_to_symbol.get(instrument_key, instrument_key)
+        
+        # ALWAYS update QuoteStore (Algorithm correctness)
         self._quote_store.ingest_tick(symbol, price, ts)
+        
         self._tick_count += 1
         self._last_tick = {
             "symbol": symbol,
@@ -288,7 +328,10 @@ class RealtimeRuntime:
         }
         self._last_tick_at = datetime.now(tz=timezone.utc)
         self._stale_alert_sent = False
-        await self._write_tick_cache(symbol, price, ts)
+        
+        # Throttled Redis update (UI/Dashboard)
+        if self._should_update_redis(symbol, price, ts):
+            await self._write_tick_cache(symbol, price, ts)
 
     async def _handle_tick_event(self, event: Dict[str, object]) -> None:
         # For now, no-op. Reserved for future processing of extra fields.
@@ -340,16 +383,26 @@ class RealtimeRuntime:
             except Exception:
                 return
 
-    async def _write_tick_cache(self, symbol: str, price: Decimal, ts: datetime) -> None:
+    async def _write_tick_cache(self, symbol: str, price: Decimal, ts: datetime, force: bool = False) -> None:
         if self._redis_cache is None:
             return
+        
         payload = {
             "symbol": symbol,
             "price": float(price),
             "ts": to_ist_iso(ts),
         }
         ttl = int(self._get_config().get("redis", {}).get("tick_ttl_seconds", 120))
-        await self._redis_cache.set_json(f"tick:{symbol}", payload, ttl)
+        
+        # Fire and forget write to avoid blocking
+        try:
+            await self._redis_cache.set_json(f"tick:{symbol}", payload, ttl)
+            
+            # Update tracking state
+            self._last_redis_write[symbol] = datetime.now(tz=timezone.utc)
+            self._last_redis_price[symbol] = price
+        except Exception:
+            pass
 
     async def get_realtime_prices(self, symbols: List[str]) -> Dict[str, Decimal]:
         prices: Dict[str, Decimal] = {}
@@ -432,6 +485,12 @@ class RealtimeRuntime:
         self._recent_signals.append(signal)
         if len(self._recent_signals) > 50:
             self._recent_signals = self._recent_signals[-50:]
+            
+        # Force flush Redis update for this symbol so UI sees the move immediately
+        try:
+            await self.force_flush(event.symbol)
+        except Exception:
+            pass
 
     async def _monitor_health(self) -> None:
         while True:
