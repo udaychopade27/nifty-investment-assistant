@@ -20,6 +20,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
 
   # Unified Application (API + Scheduler + Telegram)
   app:
@@ -75,9 +79,14 @@ services:
       - /etc/timezone:/etc/timezone:ro
     ports:
       - "8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     networks:
       - etf_network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/api/v1/health')"]
       interval: 30s
@@ -94,6 +103,10 @@ services:
     networks:
       - etf_network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.05"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -108,10 +121,14 @@ services:
     depends_on:
       - app
     ports:
-      - "3000:3000"
+      - "3000:80"
     networks:
       - etf_network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
 
 volumes:
   postgres_data:
