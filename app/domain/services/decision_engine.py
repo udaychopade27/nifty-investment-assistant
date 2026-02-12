@@ -168,8 +168,10 @@ class DecisionEngine:
             suggested_total_amount=suggested_total,
             actual_investable_amount=actual_investable,
             unused_amount=total_unused,
-            remaining_base_capital=capital_state.base_remaining - base_amount,
-            remaining_tactical_capital=capital_state.tactical_remaining - tactical_amount,
+            # Remaining capital shown in a decision should represent current available
+            # capital before any manual trade execution happens.
+            remaining_base_capital=capital_state.base_remaining,
+            remaining_tactical_capital=capital_state.tactical_remaining,
             explanation=explanation,
             strategy_version=self.strategy_version,
             created_at=now_ist_naive()

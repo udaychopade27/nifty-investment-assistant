@@ -128,7 +128,11 @@ async def get_rules():
         raise HTTPException(status_code=500, detail="Configuration not loaded")
     
     capital_rules = config_engine.get_rule('capital_rules')
-    dip_thresholds = config_engine.get_rule('dip_thresholds')
+    # Backward compatibility:
+    # - Legacy schema: rules.dip_thresholds
+    # - Current schema: rules.etf_tactical_rules
+    rules = config_engine.get_rule()
+    dip_thresholds = rules.get('dip_thresholds') or rules.get('etf_tactical_rules', {})
     price_rules = config_engine.get_rule('price_rules')
     strategy = config_engine.get_rule('strategy')
     

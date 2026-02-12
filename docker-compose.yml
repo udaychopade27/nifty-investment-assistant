@@ -34,6 +34,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql+asyncpg://etf_user:etf_password@db:5432/etf_assistant
       API_HOST: 0.0.0.0
@@ -103,6 +105,8 @@ services:
     networks:
       - etf_network
     restart: unless-stopped
+    depends_on:
+      - db
     deploy:
       resources:
         limits:
@@ -120,6 +124,8 @@ services:
     container_name: etf_frontend
     depends_on:
       - app
+      - db
+      - redis
     ports:
       - "3000:80"
     networks:

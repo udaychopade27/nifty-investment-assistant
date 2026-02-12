@@ -190,6 +190,7 @@ class ETFScheduler:
                 unit_engine = UnitCalculationEngine(price_buffer_pct=Decimal('2.0'))
                 
                 # ✅ FIXED: Create DecisionEngine WITHOUT CapitalEngine (it's pure)
+                rules = self.config_engine.get_rule()
                 decision_engine_inst = DecisionEngine(
                     market_context_engine=market_context_engine,
                     # ❌ capital_engine NOT passed - DecisionEngine is pure
@@ -198,8 +199,8 @@ class ETFScheduler:
                     base_allocation=self.config_engine.base_allocation,
                     tactical_allocation=self.config_engine.tactical_allocation,
                     strategy_version=self.config_engine.strategy_version,
-                    dip_thresholds=self.config_engine.get_rule('dip_thresholds'),
-                    tactical_priority_config=self.config_engine.get_rule('tactical_priority')
+                    dip_thresholds=rules,
+                    tactical_priority_config=rules.get('tactical_priority', {})
                 )
                 
                 logger.info("✅ DecisionEngine initialized (pure)")

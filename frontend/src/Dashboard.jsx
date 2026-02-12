@@ -322,6 +322,14 @@ const TodayDecision = ({ decision, onInvest }) => {
   
   const decisionType = decision.decision_type || 'NONE';
   const { icon: Icon, bg, text } = decisionIcons[decisionType];
+  const investableAmount = Number(decision.actual_investable_amount || 0);
+  const plannedTacticalEtfs = Array.isArray(decision.etf_decisions)
+    ? decision.etf_decisions.filter((row) => Number(row?.units || 0) > 0)
+    : [];
+  const canExecuteTactical =
+    decisionType !== 'NONE' &&
+    investableAmount > 0 &&
+    plannedTacticalEtfs.length > 0;
   
   return (
     <Card className="p-6">
@@ -380,9 +388,14 @@ const TodayDecision = ({ decision, onInvest }) => {
         )}
         
         {decisionType !== 'NONE' && (
-          <Button variant="primary" className="w-full" onClick={() => onInvest('tactical')}>
+          <Button
+            variant="primary"
+            className="w-full"
+            onClick={() => onInvest('tactical')}
+            disabled={!canExecuteTactical}
+          >
             <Zap className="h-4 w-4 mr-2 inline" />
-            Execute Tactical Investment
+            {canExecuteTactical ? 'Execute Tactical Investment' : 'No Executable Tactical Plan Today'}
           </Button>
         )}
       </div>
@@ -1404,7 +1417,15 @@ const QuickTradeModal = ({ isOpen, onClose, tradeType, symbols, onSubmit, basePl
   const [price, setPrice] = useState('');
   const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(false);
-  const tacticalBlocked = tradeType === 'tactical' && (!decision || decision.decision_type === 'NONE');
+  const tacticalPlannedEtfs = Array.isArray(decision?.etf_decisions)
+    ? decision.etf_decisions.filter((row) => Number(row?.units || 0) > 0)
+    : [];
+  const tacticalBlocked = tradeType === 'tactical' && (
+    !decision ||
+    decision.decision_type === 'NONE' ||
+    Number(decision.actual_investable_amount || 0) <= 0 ||
+    tacticalPlannedEtfs.length === 0
+  );
   const todayStr = new Date().toISOString().slice(0, 10);
   const currentMonth = todayStr.slice(0, 7);
   const alreadyExecuted = (() => {
@@ -1501,7 +1522,7 @@ const QuickTradeModal = ({ isOpen, onClose, tradeType, symbols, onSubmit, basePl
         <div className="space-y-4">
           {tacticalBlocked && (
             <div className="bg-amber-50 text-amber-800 text-sm p-3 rounded-lg">
-              Tactical trades are blocked because today's decision is NONE.
+              Tactical trades are blocked because today's decision has no executable tactical ETF plan.
             </div>
           )}
           {alreadyExecuted && (
