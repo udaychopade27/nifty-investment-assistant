@@ -10,6 +10,8 @@ from pathlib import Path
 import json
 import random
 import hashlib
+import joblib
+import pandas as pd
 
 from app.domain.services.config_engine import ConfigEngine
 from app.infrastructure.market_data.options.subscription_manager import OptionsSubscriptionManager
@@ -44,6 +46,17 @@ from app.infrastructure.repositories.options.capital_repository import OptionsCa
 from app.utils.time import IST, to_ist_iso
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_OPTIONS_ML_FEATURES = [
+    "ret_1",
+    "ret_3",
+    "ret_5",
+    "ema_10",
+    "ema_20",
+    "rsi",
+    "vol",
+    "vol_ratio",
+]
 
 
 class OptionsRuntime:
@@ -96,6 +109,11 @@ class OptionsRuntime:
         self._ops_cfg: Dict[str, Any] = {}
         self._promotion_cfg: Dict[str, Any] = {}
         self._ml_pipeline_cfg: Dict[str, Any] = {}
+        self._options_ml_model = None
+        self._options_ml_feature_names: list[str] = list(DEFAULT_OPTIONS_ML_FEATURES)
+        self._options_ml_model_path: Path = Path("models/options_signal_model.joblib")
+        self._options_ml_features_path: Path = Path("models/options_feature_list.txt")
+        self._options_ml_last_loaded: Optional[str] = None
         self._strike_selection_cfg: Dict[str, Any] = {}
         self._runtime_state_file: Path = Path("data/options_runtime_state.json")
         self._oi_snapshot_file: Path = Path("data/options_oi_snapshots.jsonl")
@@ -160,6 +178,9 @@ class OptionsRuntime:
         self._ops_cfg = options_cfg.get("operations", {}) or {}
         self._promotion_cfg = options_cfg.get("promotion_gates", {}) or {}
         self._ml_pipeline_cfg = options_cfg.get("ml_pipeline", {}) or {}
+        self._options_ml_model_path = Path(str(self._ml_pipeline_cfg.get("model_path", "models/options_signal_model.joblib")))
+        self._options_ml_features_path = Path(str(self._ml_pipeline_cfg.get("features_path", "models/options_feature_list.txt")))
+        self._load_options_ml_assets()
         self._strike_selection_cfg = options_cfg.get("strike_selection", {}) or {}
         self._runtime_state_file = Path(str(self._ops_cfg.get("runtime_state_file", "data/options_runtime_state.json")))
         self._oi_snapshot_file = Path(str(self._ops_cfg.get("oi_snapshot_file", "data/options_oi_snapshots.jsonl")))
@@ -1266,17 +1287,12 @@ class OptionsRuntime:
             self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["confidence_below_threshold"], "base_confidence": round(base_conf, 3)}
             return None
         features = build_features(pre_signal, indicator)
+        model_features = self._build_options_ml_features(symbol, indicator)
         feature_version = str(self._ml_pipeline_cfg.get("feature_version", "v1"))
         features["data_quality_score"] = float(indicator.get("data_quality_score") or 0.0)
         features["regime_trending"] = 1.0 if str(indicator.get("regime", "Range")) == "Trending" else 0.0
         ml_score = self._learner.predict(features)
         ml_mode = str(self._ml_pipeline_cfg.get("mode", "gate")).lower()
-        if force_direction is None and self._ml_drift_state.get("gate_blocked"):
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["ml_drift_guard_blocked"], "ml_score": round(ml_score, 3)}
-            return None
-        if force_direction is None and ml_mode == "gate" and not self._learner.allow_signal(features):
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["ml_score_below_threshold"], "ml_score": round(ml_score, 3)}
-            return None
 
         # Risk limits
         if not self._risk_allows(risk):
@@ -1323,6 +1339,7 @@ class OptionsRuntime:
             "ml_mode": ml_mode,
             "feature_version": feature_version,
             "_ml_features": features,
+            "_ml_model_features": model_features,
         }
         self._metrics["signals_generated"] = float(self._metrics.get("signals_generated", 0)) + 1
         self._last_signal_ts[f"{symbol}:{signal_type}"] = datetime.now(IST)
@@ -1659,6 +1676,8 @@ class OptionsRuntime:
             "mae": 0.0,
             "ml_score": signal.get("ml_score"),
             "ml_features": signal.get("_ml_features"),
+            "ml_model_features": signal.get("_ml_model_features"),
+            "ml_signal_type": signal.get("signal"),
             "feature_version": signal.get("feature_version"),
             "entry_slippage_pct": round(slippage_pct, 3),
             "max_hold_minutes": int(signal.get("max_hold_minutes") or self._strategy_cfg.get("signal", {}).get("max_hold_minutes", 20)),
@@ -1729,8 +1748,10 @@ class OptionsRuntime:
                 features,
                 won=won,
                 pnl=float(pos["realized_pnl"]),
+                model_features=pos.get("ml_model_features") if isinstance(pos.get("ml_model_features"), dict) else None,
                 meta={
                     "symbol": pos.get("symbol"),
+                    "signal_type": pos.get("ml_signal_type"),
                     "exit_reason": reason,
                     "mfe": pos.get("mfe"),
                     "mae": pos.get("mae"),
@@ -1746,7 +1767,14 @@ class OptionsRuntime:
         self._save_runtime_state()
         self._refresh_paper_state()
 
-    def _append_learning_sample(self, features: Dict[str, Any], won: bool, pnl: float, meta: Optional[Dict[str, Any]] = None) -> None:
+    def _append_learning_sample(
+        self,
+        features: Dict[str, Any],
+        won: bool,
+        pnl: float,
+        model_features: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
         cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
         sample_path = Path(str(cfg.get("samples_path", "data/options_paper_samples.jsonl")))
         payload = {
@@ -1754,6 +1782,7 @@ class OptionsRuntime:
             "won": bool(won),
             "pnl": round(float(pnl), 2),
             "features": features,
+            "model_features": model_features or {},
             "meta": meta or {},
         }
         try:
@@ -1999,32 +2028,273 @@ class OptionsRuntime:
         }
 
     def train_ml_from_samples(self) -> Dict[str, Any]:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.metrics import accuracy_score
+
         cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
         samples_path = str(cfg.get("samples_path", "data/options_paper_samples.jsonl"))
-        return self._learner.train_from_samples(samples_path)
+        rows = self._read_options_ml_training_rows(samples_path)
+        if len(rows) < 30:
+            return {"trained": False, "reason": "insufficient_model_samples", "samples": len(rows)}
+
+        rows.sort(key=lambda x: x[0])
+        split = max(20, int(len(rows) * 0.8))
+        train_rows = rows[:split]
+        test_rows = rows[split:]
+        if not test_rows:
+            test_rows = train_rows[-10:]
+            train_rows = train_rows[:-10]
+            if not train_rows:
+                return {"trained": False, "reason": "insufficient_train_test_split", "samples": len(rows)}
+
+        feature_cols = list(self._options_ml_feature_names or DEFAULT_OPTIONS_ML_FEATURES)
+        X_train = pd.DataFrame([r[1] for r in train_rows]).reindex(columns=feature_cols, fill_value=0.0)
+        y_train = [r[2] for r in train_rows]
+        X_test = pd.DataFrame([r[1] for r in test_rows]).reindex(columns=feature_cols, fill_value=0.0)
+        y_test = [r[2] for r in test_rows]
+
+        model = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=8,
+            min_samples_split=25,
+            min_samples_leaf=10,
+            random_state=42,
+            n_jobs=-1,
+        )
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        accuracy = float(accuracy_score(y_test, preds)) if len(y_test) else 0.0
+
+        self._options_ml_model_path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, self._options_ml_model_path)
+        self._options_ml_features_path.parent.mkdir(parents=True, exist_ok=True)
+        self._options_ml_features_path.write_text("\n".join(feature_cols), encoding="utf-8")
+        self._load_options_ml_assets()
+
+        return {
+            "trained": True,
+            "samples_used": len(rows),
+            "train_samples": len(train_rows),
+            "test_samples": len(test_rows),
+            "directional_accuracy_pct": round(accuracy * 100.0, 2),
+            "model_path": str(self._options_ml_model_path),
+            "features_path": str(self._options_ml_features_path),
+            "model_loaded": self._options_ml_model is not None,
+            "feature_count": len(feature_cols),
+        }
 
     def evaluate_ml_walk_forward(self) -> Dict[str, Any]:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.metrics import accuracy_score
+
         cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
         samples_path = str(cfg.get("samples_path", "data/options_paper_samples.jsonl"))
-        return self._learner.walk_forward_evaluate(samples_path)
+        rows = self._read_options_ml_training_rows(samples_path)
+        if len(rows) < 30:
+            return {"ok": False, "reason": "insufficient_model_samples", "samples": len(rows)}
+
+        rows.sort(key=lambda x: x[0])
+        split = max(20, int(len(rows) * 0.7))
+        train_rows = rows[:split]
+        test_rows = rows[split:]
+        if not test_rows:
+            return {"ok": False, "reason": "insufficient_test_samples", "samples": len(rows)}
+
+        feature_cols = list(self._options_ml_feature_names or DEFAULT_OPTIONS_ML_FEATURES)
+        X_train = pd.DataFrame([r[1] for r in train_rows]).reindex(columns=feature_cols, fill_value=0.0)
+        y_train = [r[2] for r in train_rows]
+        X_test = pd.DataFrame([r[1] for r in test_rows]).reindex(columns=feature_cols, fill_value=0.0)
+        y_test = [r[2] for r in test_rows]
+
+        model = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=8,
+            min_samples_split=25,
+            min_samples_leaf=10,
+            random_state=42,
+            n_jobs=-1,
+        )
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        accuracy = float(accuracy_score(y_test, preds)) if len(y_test) else 0.0
+        probs = model.predict_proba(X_test)[:, 1] if len(X_test) else []
+        avg_prob = float(sum(float(p) for p in probs) / len(probs)) if len(probs) else 0.0
+
+        return {
+            "ok": True,
+            "train_samples": len(train_rows),
+            "test_samples": len(test_rows),
+            "directional_accuracy_pct": round(accuracy * 100.0, 2),
+            "avg_up_prob_test": round(avg_prob, 4),
+            "feature_count": len(feature_cols),
+            "model_loaded": self._options_ml_model is not None,
+            "model_path": str(self._options_ml_model_path),
+        }
 
     def get_ml_samples_status(self) -> Dict[str, Any]:
         cfg = self._strategy_cfg.get("signal", {}).get("ml", {}) or {}
         samples_path = str(cfg.get("samples_path", "data/options_paper_samples.jsonl"))
         path = Path(samples_path)
         count = 0
+        model_rows = 0
         if path.exists():
             try:
                 with path.open("r", encoding="utf-8") as f:
-                    count = sum(1 for _ in f)
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        count += 1
+                        try:
+                            row = json.loads(line)
+                        except Exception:
+                            continue
+                        if isinstance(row.get("model_features"), dict) and row.get("model_features"):
+                            model_rows += 1
             except Exception:
                 count = 0
+                model_rows = 0
         return {
             "enabled": self._enabled,
             "samples_path": samples_path,
             "samples_count": count,
+            "model_ready_samples": model_rows,
+            "model_loaded": self._options_ml_model is not None,
+            "model_path": str(self._options_ml_model_path),
+            "features_path": str(self._options_ml_features_path),
+            "feature_count": len(self._options_ml_feature_names or []),
+            "model_last_loaded": self._options_ml_last_loaded,
             "learner": self._learner.status(),
         }
+
+    def _load_options_ml_assets(self) -> None:
+        self._options_ml_model = None
+        self._options_ml_last_loaded = None
+        features = list(DEFAULT_OPTIONS_ML_FEATURES)
+        try:
+            if self._options_ml_features_path.exists():
+                lines = [
+                    line.strip()
+                    for line in self._options_ml_features_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                if lines:
+                    features = lines
+            self._options_ml_feature_names = features
+        except Exception as exc:
+            logger.warning("failed loading options ml feature file: %s", exc)
+            self._options_ml_feature_names = list(DEFAULT_OPTIONS_ML_FEATURES)
+
+        try:
+            if self._options_ml_model_path.exists():
+                self._options_ml_model = joblib.load(self._options_ml_model_path)
+                self._options_ml_last_loaded = datetime.now(IST).isoformat()
+                logger.info("options ml model loaded: %s", self._options_ml_model_path)
+        except Exception as exc:
+            logger.warning("failed loading options ml model: %s", exc)
+            self._options_ml_model = None
+
+    def _build_options_ml_features(self, symbol: str, indicator: Dict[str, Any]) -> Dict[str, float]:
+        history = self._history.get(symbol)
+        if not history or len(history) < 21:
+            return {}
+        closes = [float(c.close) for c in history]
+        volumes = [float(c.volume) for c in history]
+        close_now = closes[-1]
+        if close_now <= 0:
+            return {}
+
+        def _ret(period: int) -> float:
+            if len(closes) <= period:
+                return 0.0
+            base = closes[-1 - period]
+            if base <= 0:
+                return 0.0
+            return float((close_now / base) - 1.0)
+
+        s = pd.Series(closes)
+        ret1_series = s.pct_change(1)
+        vol = float(ret1_series.tail(10).std() or 0.0)
+        ema_10 = float(s.ewm(span=10, adjust=False).mean().iloc[-1])
+        ema_20 = float(s.ewm(span=20, adjust=False).mean().iloc[-1])
+        vol_ma = float(pd.Series(volumes).tail(10).mean() or 0.0)
+        vol_ratio = float(volumes[-1] / (vol_ma + 1.0))
+        rsi_value = indicator.get("rsi")
+        try:
+            rsi_float = float(rsi_value) if rsi_value is not None else 50.0
+        except Exception:
+            rsi_float = 50.0
+
+        return {
+            "ret_1": _ret(1),
+            "ret_3": _ret(3),
+            "ret_5": _ret(5),
+            "ema_10": ema_10,
+            "ema_20": ema_20,
+            "rsi": rsi_float,
+            "vol": vol,
+            "vol_ratio": vol_ratio,
+        }
+
+    def _compute_options_ml_score(self, signal_type: str, features: Dict[str, float]) -> tuple[Optional[float], Dict[str, Any]]:
+        if self._options_ml_model is None:
+            return None, {"available": False, "reason": "model_not_loaded"}
+        if not features:
+            return None, {"available": False, "reason": "features_unavailable"}
+
+        cols = list(self._options_ml_feature_names or DEFAULT_OPTIONS_ML_FEATURES)
+        payload = {k: float(features.get(k, 0.0) or 0.0) for k in cols}
+        df = pd.DataFrame([payload]).reindex(columns=cols, fill_value=0.0)
+        try:
+            probs = self._options_ml_model.predict_proba(df)[0]
+            up_prob = float(probs[1]) if len(probs) > 1 else float(probs[0])
+            if signal_type == "BUY_CE":
+                score = up_prob
+            elif signal_type == "BUY_PE":
+                score = 1.0 - up_prob
+            else:
+                score = up_prob
+            score = max(0.0, min(1.0, float(score)))
+            return score, {
+                "available": True,
+                "up_prob": round(up_prob, 4),
+                "directional_score": round(score, 4),
+                "model_path": str(self._options_ml_model_path),
+                "feature_count": len(cols),
+            }
+        except Exception as exc:
+            return None, {"available": False, "reason": f"prediction_failed:{exc}"}
+
+    def _read_options_ml_training_rows(self, samples_path: str) -> list[tuple[datetime, Dict[str, float], int]]:
+        path = Path(samples_path)
+        if not path.exists():
+            return []
+        rows: list[tuple[datetime, Dict[str, float], int]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            model_features = row.get("model_features") if isinstance(row.get("model_features"), dict) else None
+            if not model_features:
+                continue
+            meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            signal_type = str(meta.get("signal_type") or "")
+            won = bool(row.get("won", False))
+            if signal_type not in ("BUY_CE", "BUY_PE"):
+                continue
+            target = 1 if ((signal_type == "BUY_CE" and won) or (signal_type == "BUY_PE" and not won)) else 0
+            try:
+                ts = datetime.fromisoformat(str(row.get("ts")))
+            except Exception:
+                ts = datetime.min
+            feats = {
+                k: float(model_features.get(k, 0.0) or 0.0)
+                for k in (self._options_ml_feature_names or DEFAULT_OPTIONS_ML_FEATURES)
+            }
+            rows.append((ts, feats, int(target)))
+        return rows
 
     def get_audit_log(self, limit: int = 100) -> Dict[str, Any]:
         safe_limit = max(1, min(1000, int(limit)))
@@ -2281,6 +2551,7 @@ class OptionsRuntime:
             return
         signal_payload = dict(signal)
         signal_payload.pop("_ml_features", None)
+        signal_payload.pop("_ml_model_features", None)
         async with async_session_factory() as session:
             repo = OptionsSignalRepository(session)
             await repo.save_signal(signal_payload)
@@ -2328,6 +2599,16 @@ class OptionsRuntime:
             "hard_target": signal.get("target"),
             "idempotency_key": self._signal_dedup_key(signal),
         }
+        if not isinstance(signal.get("_ml_model_features"), dict):
+            signal["_ml_model_features"] = self._build_options_ml_features(symbol, indicator)
+        model_score, model_meta = self._compute_options_ml_score(
+            str(signal.get("signal", "")),
+            signal.get("_ml_model_features") if isinstance(signal.get("_ml_model_features"), dict) else {},
+        )
+        if model_score is not None:
+            signal["ml_score"] = round(model_score, 3)
+            signal["ml_confidence_score"] = round(model_score * 100.0, 2)
+        signal["ml_model"] = model_meta
 
         confidence = signal.get("confidence_base")
         if confidence is None:
@@ -2337,6 +2618,12 @@ class OptionsRuntime:
             confidence = max(0.0, min(1.0, round(confidence + adj, 3)))
         signal["confidence"] = confidence
         signal["confidence_project"] = signal.get("confidence_score")
+        if model_score is not None:
+            blend_weight = float(self._ml_pipeline_cfg.get("confidence_blend_weight", 0.35))
+            blend_weight = max(0.0, min(1.0, blend_weight))
+            signal["confidence_with_ml"] = round(((1.0 - blend_weight) * float(confidence)) + (blend_weight * float(model_score)), 3)
+        else:
+            signal["confidence_with_ml"] = None
         min_conf = float(self._strategy_cfg.get("signal", {}).get("min_confidence", 0.62))
         if not signal.get("forced") and confidence < min_conf:
             self._metrics["signals_blocked"] = float(self._metrics.get("signals_blocked", 0)) + 1

@@ -204,6 +204,9 @@ options:
   ml_pipeline:
     feature_version: v2
     mode: shadow
+    model_path: models/options_signal_model.joblib
+    features_path: models/options_feature_list.txt
+    confidence_blend_weight: 0.35
     drift_guard:
       enabled: true
       window_trades: 20

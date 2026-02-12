@@ -1,0 +1,8 @@
+ret_1
+ret_3
+ret_5
+ema_10
+ema_20
+rsi
+vol
+vol_ratio

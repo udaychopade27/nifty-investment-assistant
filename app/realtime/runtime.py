@@ -18,6 +18,7 @@ from app.infrastructure.cache.redis_cache import RedisCache
 from app.infrastructure.market_data.quote_store import QuoteStore, MinuteBar
 from app.infrastructure.market_data.streams.multiplexer import MarketDataMultiplexer
 from app.infrastructure.market_data.options.subscription_manager import OptionsSubscriptionManager
+from app.infrastructure.data.recorder import MarketDataRecorder
 from app.realtime.signal_queue import SignalQueue, SignalWorker, SignalEvent
 from app.utils.notifications import send_tiered_telegram_message
 from app.utils.time import now_ist_naive, to_ist_iso
@@ -31,6 +32,7 @@ class RealtimeRuntime:
         self._quote_store: Optional[QuoteStore] = None
         self._multiplexer: Optional[MarketDataMultiplexer] = None
         self._redis_cache: Optional[RedisCache] = None
+        self._recorder: Optional[MarketDataRecorder] = None # Initialize Data Recorder
         self._key_to_symbol: Dict[str, str] = {}
         self._signal_queue: Optional[SignalQueue] = None
         self._signal_worker: Optional[SignalWorker] = None
@@ -318,6 +320,15 @@ class RealtimeRuntime:
         
         # ALWAYS update QuoteStore (Algorithm correctness)
         self._quote_store.ingest_tick(symbol, price, ts)
+        
+        # Record tick for ML training
+        if self._recorder:
+             # Fire and forget recording to avoid blocking
+            asyncio.create_task(self._recorder.ingest_tick(
+                symbol=symbol,
+                price=float(price),
+                ts=ts
+            ))
         
         self._tick_count += 1
         self._last_tick = {

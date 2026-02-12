@@ -329,9 +329,11 @@ async def root():
 
 
 # Import and include routers
-from app.api.routes import decision, portfolio, config as config_routes, capital, invest, market_data
+from app.api.routes import capital, decision, invest, portfolio, config as config_routes, market_data
 from app.api.routes.options import router as options_router
+from app.api.routes import ml as ml_router
 
+# Include routers
 app.include_router(capital.router, prefix="/api/v1/capital", tags=["Capital"])
 app.include_router(decision.router, prefix="/api/v1/decision", tags=["Tactical Signals"])
 app.include_router(invest.router, prefix="/api/v1/invest", tags=["Base & Tactical Execution"])
@@ -339,6 +341,7 @@ app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["Portfoli
 app.include_router(config_routes.router, prefix="/api/v1/config", tags=["Config"])
 app.include_router(market_data.router, prefix="/api/v1/market-data", tags=["Market Data"])
 app.include_router(options_router.router, prefix="/api/v1/options", tags=["Options"])
+app.include_router(ml_router.router, prefix="/api/v1/ml", tags=["ML Predictions"])
 
 
 if __name__ == "__main__":

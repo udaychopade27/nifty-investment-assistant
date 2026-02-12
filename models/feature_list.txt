@@ -1,0 +1,12 @@
+returns
+log_returns
+sma_10
+sma_50
+sma_200
+rsi
+macd
+macd_signal
+macd_diff
+bb_width
+volatility
+volume_ratio
