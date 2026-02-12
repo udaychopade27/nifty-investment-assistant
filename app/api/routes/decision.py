@@ -372,6 +372,7 @@ async def generate_decision(
         capital_state = await capital_engine.get_capital_state(monthly_config.month)
         
         # Create decision engine
+        rules = config_engine.get_rule()
         decision_engine_inst = DecisionEngine(
             market_context_engine=market_context_engine,
             allocation_engine=allocation_engine,
@@ -379,8 +380,8 @@ async def generate_decision(
             base_allocation=config_engine.base_allocation,
             tactical_allocation=config_engine.tactical_allocation,
             strategy_version=config_engine.strategy_version,
-            dip_thresholds=config_engine.get_rule('dip_thresholds'),
-            tactical_priority_config=config_engine.get_rule('tactical_priority')
+            dip_thresholds=rules,
+            tactical_priority_config=rules.get('tactical_priority', {})
         )
         
         # Fetch market data
