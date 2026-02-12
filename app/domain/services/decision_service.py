@@ -190,6 +190,12 @@ class DecisionService:
                     if start_3 > Decimal("0"):
                         three_day = ((end_3 - start_3) / start_3 * Decimal("100")).quantize(Decimal("0.01"))
                         index_metrics_by_etf[symbol]["three_day_change_pct"] = three_day
+                if len(closes_20) >= 5:
+                    start_5 = closes_20[-5]
+                    end_5 = closes_20[-1]
+                    if start_5 > Decimal("0"):
+                        five_day = ((end_5 - start_5) / start_5 * Decimal("100")).quantize(Decimal("0.01"))
+                        index_metrics_by_etf[symbol]["five_day_change_pct"] = five_day
             except Exception:
                 # Non-fatal: provider may not support this index symbol path consistently.
                 pass

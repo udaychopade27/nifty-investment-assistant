@@ -10,57 +10,28 @@ capital_rules:
   min_monthly_capital: 1000.0    # Minimum ₹1,000
   max_monthly_capital: 1000000.0 # Maximum ₹10,00,000
 
-# Dip Detection Thresholds
-dip_thresholds:
-  none:
-    min_change: -0.75            # No dip above -0.75%
-    tactical_deployment: 0.0
+# Tactical Strategy: Smart Daily Dip with Strategic Caps
+etf_tactical_rules:
+  strategy: "smart_daily_dip_capped"
+  weights_as_caps: true          # Use tactical_allocation % as hard max cap
   
-  small:
-    min_change: -1.5             # Small dip: -0.75% to -1.5%
-    max_change: -0.75
-    tactical_deployment: 25.0    # Deploy 25% tactical
+  tiers:
+    - { trigger: -0.75, multiplier: 0.5 }   # Small dip > -0.75%
+    - { trigger: -1.50, multiplier: 1.0 }   # Medium dip > -1.5%
+    - { trigger: -2.50, multiplier: 1.5 }   # Large dip > -2.5%
   
-  medium:
-    min_change: -2.5             # Medium dip: -1.5% to -2.5%
-    max_change: -1.5
-    tactical_deployment: 50.0    # Deploy 50% tactical
+  safety:
+    falling_knife_guard:
+      enabled: true
+      lookback_days: 5
+      threshold: -4.0            # If down > 4% in 5 days
+      penalty_factor: 0.5        # Reduce allocation by 50%
 
-  high:
-    min_change: -3.5             # High dip: -2.5% to -3.5%
-    max_change: -2.5
-    tactical_deployment: 75.0    # Deploy 75% tactical
-  
-  full:
-    max_change: -3.5             # Full dip: below -3.5%
-    tactical_deployment: 100.0   # Deploy 100% tactical
-
-# Tactical multi-index priority allocator (production mode)
-tactical_priority:
-  enabled: true
-  ranking:
-    rank_splits: [50, 30, 20]     # Rank1/Rank2/Rank3 split of tactical budget
-    max_ranked_etfs: 3
-    max_etf_cap_pct_of_tactical: 40
-    min_allocation_amount: 50
-  thresholds:
-    min_priority_score: 5
-  scoring_weights:
-    severity: 50
-    persistence: 20
-    liquidity: 15
-    confidence: 15
-    correlation_penalty: 10
-  correlations:
-    groups:
-      - ["NIFTYBEES", "JUNIORBEES", "MIDCAPETF"]
-      - ["ICICIVALUE", "ICICIMOM30"]
-
-# Multi-Day Trend Rules
+# Multi-Day Trend Rules (Legacy / Aux support)
 trend_rules:
-  three_day_threshold: 2.5       # 3-day fall ≥ 2.5% = MEDIUM override
-  five_day_threshold: 4.0        # 5-day fall ≥ 4.0% = FULL override
-  consecutive_red_days: 3        # 3 red days in row = attention
+  three_day_threshold: 2.5       # Keep for monitoring
+  five_day_threshold: 4.0
+  consecutive_red_days: 3
 
 # Crash Opportunity Detection
 crash_detection:

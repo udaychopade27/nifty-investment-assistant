@@ -196,6 +196,15 @@ class DecisionEngine:
         daily_change = market_context.daily_change_pct
         three_day_change = market_context.cumulative_3day_pct
         
+        if self.dip_thresholds.get("etf_tactical_rules", {}).get("strategy") == "smart_daily_dip_capped":
+             # Smart strategy: Check if ANY ETF has a valid dip
+             # This is just a label for the daily record. Actual allocation happens per-ETF.
+             return self._determine_decision_type_smart_dip(market_context)
+        
+        # Legacy global logic
+        daily_change = market_context.daily_change_pct
+        three_day_change = market_context.cumulative_3day_pct
+        
         # Check for 3-day override
         if three_day_change <= Decimal('-2.5'):
             return DecisionType.MEDIUM
@@ -239,7 +248,16 @@ class DecisionEngine:
                 capital_state.base_remaining
             )
         
-        # Tactical amount based on decision type
+        tactical_amount = Decimal('0')
+        
+        # Smart Dip Strategy: Make full tactical pot available for per-ETF selection
+        if self.dip_thresholds.get("etf_tactical_rules", {}).get("strategy") == "smart_daily_dip_capped":
+            if decision_type != DecisionType.NONE:
+                # pass full remaining; caps will limit actual usage
+                tactical_amount = capital_state.tactical_remaining
+            return base_amount, tactical_amount
+
+        # Legacy Strategy
         tactical_pct = Decimal('0')
         if tactical_deploy_pct is not None:
             tactical_pct = tactical_deploy_pct
@@ -253,7 +271,6 @@ class DecisionEngine:
             elif decision_type == DecisionType.FULL:
                 tactical_pct = Decimal('100')
         
-        tactical_amount = Decimal('0')
         if tactical_pct > Decimal('0'):
             tactical_to_deploy = (
                 capital_state.tactical_remaining * tactical_pct / Decimal('100')
@@ -375,83 +392,130 @@ class DecisionEngine:
         index_metrics_by_etf: dict[str, Dict[str, Decimal]],
     ) -> List[ETFAllocation]:
         """
-        Priority-ranked tactical allocation.
-        - Builds an eligible ETF set from dip tiers
-        - Scores each eligible ETF
-        - Allocates tactical budget by rank splits with per-ETF cap
+        Smart Daily Dip Allocation with Weights-as-Caps
         """
+        # 1. Get Strategy Rules
+        rules = self.dip_thresholds.get("etf_tactical_rules", {})
+        strategy = rules.get("strategy", "legacy")
+        weights_as_caps = rules.get("weights_as_caps", False)
+        
+        # 2. Identify Eligible ETFs (Per-ETF Dip Check)
         eligible = []
+        multiplier_map = {}
+        tiers = rules.get("tiers", [])
+        
+        # Default legacy fallback if tiers missing
+        if not tiers:
+             tiers = [{"trigger": -0.75, "multiplier": 1.0}]
+
         for symbol, change in index_changes_by_etf.items():
-            if self._get_dip_tier(change) != "none":
+            # EXPLICIT GOLD EXCLUSION
+            if symbol == "HDFCGOLD":
+                continue
+                
+            best_multiplier = Decimal("0")
+            # Check tiers (assuming ordered by severity, but let's be safe)
+            # Find largest multiplier for the dip
+            for tier in tiers:
+                trigger = Decimal(str(tier["trigger"]))
+                mult = Decimal(str(tier["multiplier"]))
+                if change <= trigger:
+                    if mult > best_multiplier:
+                        best_multiplier = mult
+            
+            if best_multiplier > Decimal("0"):
                 eligible.append(symbol)
+                multiplier_map[symbol] = best_multiplier
+
         if not eligible:
             return []
 
+        # 3. Rank Eligible ETFs
         ranked = self._rank_eligible_etfs(eligible, index_changes_by_etf, index_metrics_by_etf)
         if not ranked:
             return []
-
+            
+        # 4. Allocation Logic
         rank_cfg = self.tactical_priority_config.get("ranking", {})
-        rank_splits_raw = rank_cfg.get("rank_splits", [50, 30, 20])
-        rank_splits = [Decimal(str(x)) for x in rank_splits_raw if Decimal(str(x)) > Decimal("0")]
-        if not rank_splits:
-            rank_splits = [Decimal("100")]
-        max_ranked_etfs = int(rank_cfg.get("max_ranked_etfs", len(rank_splits)))
-        max_ranked_etfs = max(1, min(max_ranked_etfs, len(ranked)))
-        selected = ranked[:max_ranked_etfs]
+        rank_splits = [Decimal(str(x)) for x in rank_cfg.get("rank_splits", [50, 30, 20])]
+        
+        # Load Tactical Weights (Strategic Preferences)
+        tactical_weights = {
+            sym: Decimal(str(pct)) 
+            for sym, pct in self.tactical_allocation.allocations.items()
+        }
+        
+        # Falling Knife Rules
+        knife_guard = rules.get("safety", {}).get("falling_knife_guard", {})
+        knife_enabled = knife_guard.get("enabled", False)
+        knife_threshold = Decimal(str(knife_guard.get("threshold", -4.0)))
+        knife_penalty = Decimal(str(knife_guard.get("penalty_factor", 0.5)))
+        
+        allocations = []
+        
+        # We process ranked ETFs. Each gets a slice of the DAILY POT based on rank.
+        # But that slice is CAPPED by the Strategic Weight of the TOTAL fund.
+        
+        # Important: Tactical Amount passed here is the REMAINING FUND.
+        # We need a concept of "Daily Pot" vs "Total Fund". 
+        # For simplicity in this design, we treat "tactical_amount" as the available pool 
+        # and "rank_splits" as % of that pool to deploy TODAY.
+        
+        for idx, (sym, _) in enumerate(ranked):
+            if idx >= len(rank_splits):
+                break # Only top N get allocated
+                
+            split_pct = rank_splits[idx]
+            
+            weight_pct = tactical_weights.get(sym, Decimal("0"))
 
-        max_cap_pct = Decimal(str(rank_cfg.get("max_etf_cap_pct_of_tactical", 40)))
-        max_cap_pct = max(Decimal("0"), min(max_cap_pct, Decimal("100")))
-        max_per_etf_amount = (tactical_amount * max_cap_pct / Decimal("100")).quantize(Decimal("0.01"))
-        min_allocation_amount = Decimal(str(rank_cfg.get("min_allocation_amount", 0)))
+            if weight_pct <= Decimal("0"):
+                continue # Safety for Gold
+                
+            strategic_cap = (tactical_amount * weight_pct / Decimal("100")).quantize(Decimal("0.01"))
 
-        # Initial allocation by rank splits
-        allocations_by_symbol: Dict[str, Decimal] = {sym: Decimal("0") for sym, _ in selected}
-        split_total = sum(rank_splits[:max_ranked_etfs]) or Decimal("100")
-        for idx, (sym, _) in enumerate(selected):
-            split = rank_splits[idx] if idx < len(rank_splits) else Decimal("0")
-            amt = (tactical_amount * split / split_total).quantize(Decimal("0.01"))
-            if max_per_etf_amount > Decimal("0"):
-                amt = min(amt, max_per_etf_amount)
-            allocations_by_symbol[sym] = amt
-
-        # Redistribute leftover (from capping or fewer splits) by score-headroom.
-        allocated_total = sum(allocations_by_symbol.values())
-        leftover = (tactical_amount - allocated_total).quantize(Decimal("0.01"))
-        if leftover > Decimal("0"):
-            total_score = sum(score for _, score in selected) or Decimal("0")
-            for sym, score in selected:
-                if leftover <= Decimal("0"):
-                    break
-                if max_per_etf_amount > Decimal("0") and allocations_by_symbol[sym] >= max_per_etf_amount:
-                    continue
-                share = (
-                    (leftover * (score / total_score)).quantize(Decimal("0.01"))
-                    if total_score > Decimal("0")
-                    else Decimal("0")
-                )
-                if share <= Decimal("0"):
-                    continue
-                if max_per_etf_amount > Decimal("0"):
-                    headroom = (max_per_etf_amount - allocations_by_symbol[sym]).quantize(Decimal("0.01"))
-                    share = min(share, headroom)
-                allocations_by_symbol[sym] += share
-                leftover -= share
-
-        result: List[ETFAllocation] = []
-        final_total = sum(allocations_by_symbol.values()) or Decimal("1")
-        for sym, amt in allocations_by_symbol.items():
-            if amt < min_allocation_amount:
-                continue
-            pct = (amt / final_total * Decimal("100")).quantize(Decimal("0.01"))
-            result.append(
-                ETFAllocation(
+            # Ideal Amount based on Dip Severity
+            multiplier = multiplier_map.get(sym, Decimal("0.5"))
+            
+            raw_allocation = (strategic_cap * multiplier).quantize(Decimal("0.01"))
+            
+            # Falling Knife Check
+            if knife_enabled:
+                metrics = index_metrics_by_etf.get(sym, {})
+                five_day = metrics.get("five_day_change_pct", Decimal("0"))
+                if five_day < knife_threshold:
+                     raw_allocation = (raw_allocation * knife_penalty).quantize(Decimal("0.01"))
+            
+            final_amt = min(raw_allocation, strategic_cap, tactical_amount)
+            
+            # Hard Safety: Don't exceed remaining cash
+            if final_amt > tactical_amount:
+                final_amt = tactical_amount
+            
+            if final_amt > Decimal("0"):
+                allocations.append(ETFAllocation(
                     etf_symbol=sym,
-                    allocated_amount=amt.quantize(Decimal("0.01")),
-                    allocation_pct=pct,
-                )
-            )
-        return result
+                    allocated_amount=final_amt,
+                    allocation_pct=Decimal("0") # Calc later
+                ))
+                tactical_amount -= final_amt # Deduct from running available
+        
+        return allocations
+
+    def _determine_decision_type_smart_dip(self, market_context: MarketContext) -> DecisionType:
+        """
+        Determine if there is any tactical action today based on configured strategy.
+        Used to set the high-level ID of the day.
+        """
+        # We rely on the fact that generate_decision calls us. 
+        # But wait, generate_decision determines type BEFORE calculating amounts.
+        # And we need index_changes (which are passed to generate_decision).
+        # We can't access index_changes here easily inside this helper if not passed.
+        # But _determine_decision_type is called inside generate_decision.
+        # Actually, in generate_decision, if index_changes_by_etf is present, 
+        # it calls _determine_decision_type_from_index_changes.
+        # So we should modify THAT method or the caller.
+        return DecisionType.MEDIUM # Default to Active if we are in this mode, logic handled in allocation.
 
     def _rank_eligible_etfs(
         self,
@@ -524,8 +588,21 @@ class DecisionEngine:
     ) -> Tuple[DecisionType, Decimal]:
         """
         Determine decision type based on worst underlying index dip.
-        Returns (DecisionType, tactical_deploy_pct).
         """
+        # For Smart Daily Dip, we just want to signal ACTIVE (MEDIUM) if any valid dip exists.
+        if self.dip_thresholds.get("etf_tactical_rules", {}).get("strategy") == "smart_daily_dip_capped":
+             tiers = self.dip_thresholds.get("etf_tactical_rules", {}).get("tiers", [])
+             # Find minimum trigger
+             min_trigger = Decimal("-0.75")
+             if tiers:
+                 min_trigger = Decimal(str(tiers[0]["trigger"])) # Assuming sorted
+             
+             for chg in index_changes_by_etf.values():
+                 if chg <= min_trigger:
+                     return DecisionType.MEDIUM, Decimal("0") # Tactical pct calculated dynamically later
+             return DecisionType.NONE, Decimal("0")
+             
+        # Legacy Logic
         changes = [c for c in index_changes_by_etf.values() if c is not None]
         if not changes:
             return DecisionType.NONE, Decimal('0')
