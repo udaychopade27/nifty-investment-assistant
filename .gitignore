@@ -87,3 +87,6 @@ temp/
 Thumbs.db
 .DS_Store
 *.zip
+
+data/options_oi_snapshots.jsonl
+data/options_runtime_state.json
