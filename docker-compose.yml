@@ -76,6 +76,8 @@ services:
       - ./config:/app/config
       - ./app:/app/app
       - ./data:/app/data
+      - ./scripts:/app/scripts
+      - ./models:/app/models
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
       - /etc/localtime:/etc/localtime:ro
