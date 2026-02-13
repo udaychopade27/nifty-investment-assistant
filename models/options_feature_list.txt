@@ -1,8 +1,5 @@
-ret_1
-ret_3
-ret_5
-ema_10
-ema_20
+ema_9_slope
+ema_21_slope
+price_vs_ema21
 rsi
-vol
-vol_ratio
+volatility

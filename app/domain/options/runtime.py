@@ -49,14 +49,11 @@ from app.utils.time import IST, to_ist_iso
 logger = logging.getLogger(__name__)
 
 DEFAULT_OPTIONS_ML_FEATURES = [
-    "ret_1",
-    "ret_3",
-    "ret_5",
-    "ema_10",
-    "ema_20",
+    "ema_9_slope",
+    "ema_21_slope",
+    "price_vs_ema21",
     "rsi",
-    "vol",
-    "vol_ratio",
+    "volatility",
 ]
 
 
@@ -2110,26 +2107,22 @@ class OptionsRuntime:
         if not history or len(history) < 21:
             return {}
         closes = [float(c.close) for c in history]
-        volumes = [float(c.volume) for c in history]
         close_now = closes[-1]
         if close_now <= 0:
             return {}
 
-        def _ret(period: int) -> float:
-            if len(closes) <= period:
-                return 0.0
-            base = closes[-1 - period]
-            if base <= 0:
-                return 0.0
-            return float((close_now / base) - 1.0)
-
         s = pd.Series(closes)
-        ret1_series = s.pct_change(1)
-        vol = float(ret1_series.tail(10).std() or 0.0)
-        ema_10 = float(s.ewm(span=10, adjust=False).mean().iloc[-1])
-        ema_20 = float(s.ewm(span=20, adjust=False).mean().iloc[-1])
-        vol_ma = float(pd.Series(volumes).tail(10).mean() or 0.0)
-        vol_ratio = float(volumes[-1] / (vol_ma + 1.0))
+        ema_9 = s.ewm(span=9, adjust=False).mean()
+        ema_21 = s.ewm(span=21, adjust=False).mean()
+        
+        # Consistent with training script logic
+        ema_9_slope = float(ema_9.diff(3).iloc[-1] / close_now * 100)
+        ema_21_slope = float(ema_21.diff(3).iloc[-1] / close_now * 100)
+        price_vs_ema21 = float((close_now - ema_21.iloc[-1]) / ema_21.iloc[-1] * 100)
+        
+        rets = s.pct_change()
+        volatility = float(rets.tail(20).std() * 100)
+        
         rsi_value = indicator.get("rsi")
         try:
             rsi_float = float(rsi_value) if rsi_value is not None else 50.0
@@ -2137,14 +2130,11 @@ class OptionsRuntime:
             rsi_float = 50.0
 
         return {
-            "ret_1": _ret(1),
-            "ret_3": _ret(3),
-            "ret_5": _ret(5),
-            "ema_10": ema_10,
-            "ema_20": ema_20,
+            "ema_9_slope": ema_9_slope,
+            "ema_21_slope": ema_21_slope,
+            "price_vs_ema21": price_vs_ema21,
             "rsi": rsi_float,
-            "vol": vol,
-            "vol_ratio": vol_ratio,
+            "volatility": volatility,
         }
 
     def _compute_options_ml_score(self, signal_type: str, features: Dict[str, float]) -> tuple[Optional[float], Dict[str, Any]]:

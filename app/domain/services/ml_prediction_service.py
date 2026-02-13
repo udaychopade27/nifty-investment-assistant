@@ -65,57 +65,37 @@ class MLPredictionService:
     def calculate_features(self, market_data: Dict[str, Any], vix_data: Optional[Dict[str, Any]] = None) -> Optional[pd.DataFrame]:
         """
         Calculate ML features from market data.
-        
-        Args:
-            market_data: Dict with keys: close, volume, historical_prices (list of recent prices)
-            vix_data: Optional dict with VIX data
-        
-        Returns:
-            DataFrame with features or None if insufficient data
+        Consistent with training script in scripts/train_on_historical.py
         """
         try:
-            # Need historical prices for feature calculation
             prices = market_data.get('historical_prices', [])
-            if len(prices) < 50:  # Need at least 50 candles for features
+            if len(prices) < 50:
                 return None
             
             df = pd.DataFrame({'close': prices})
-            df['volume'] = market_data.get('historical_volumes', [0] * len(prices))
             
-            # Calculate features
-            df['ret_1'] = df['close'].pct_change(1)
-            df['ret_3'] = df['close'].pct_change(3)
-            df['ret_5'] = df['close'].pct_change(5)
-            df['ema_10'] = df['close'].ewm(span=10).mean()
-            df['ema_20'] = df['close'].ewm(span=20).mean()
-            df['ema_50'] = df['close'].ewm(span=50).mean()
-            df['price_vs_ema10'] = (df['close'] - df['ema_10']) / df['ema_10']
-            df['price_vs_ema20'] = (df['close'] - df['ema_20']) / df['ema_20']
+            # EMAs
+            df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
+            df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
+            
+            # Slopes (normalized by price)
+            df['ema_9_slope'] = df['ema_9'].diff(3) / df['close'] * 100
+            df['ema_21_slope'] = df['ema_21'].diff(3) / df['close'] * 100
+            
+            # Price vs EMA
+            df['price_vs_ema21'] = (df['close'] - df['ema_21']) / df['ema_21'] * 100
             
             # RSI
             delta = df['close'].diff()
             gain = delta.where(delta > 0, 0).rolling(14).mean()
             loss = -delta.where(delta < 0, 0).rolling(14).mean()
-            rs = gain / loss
-            df['rsi'] = 100 - (100 / (1 + rs))
+            df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
             
             # Volatility
-            df['vol_5'] = df['ret_1'].rolling(5).std()
-            df['vol_10'] = df['ret_1'].rolling(10).std()
-            df['vol_20'] = df['ret_1'].rolling(20).std()
+            df['returns'] = df['close'].pct_change()
+            df['volatility'] = df['returns'].rolling(window=20).std() * 100
             
-            # Volume
-            df['vol_ma'] = df['volume'].rolling(10).mean()
-            df['vol_ratio'] = df['volume'] / (df['vol_ma'] + 1)
-            df['vol_surge'] = (df['vol_ratio'] > 1.5).astype(int)
-            
-            # VIX features (if available)
-            if vix_data:
-                df['vix'] = vix_data.get('current', 0)
-                df['vix_change'] = vix_data.get('change_pct', 0)
-                df['vix_percentile'] = vix_data.get('percentile', 0.5)
-            
-            return df.iloc[[-1]]  # Return only last row
+            return df.iloc[[-1]]
             
         except Exception as e:
             logger.error(f"Feature calculation failed: {e}")
