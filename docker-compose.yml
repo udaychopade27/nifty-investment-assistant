@@ -75,6 +75,7 @@ services:
     volumes:
       - ./config:/app/config
       - ./app:/app/app
+      - ./data:/app/data
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
       - /etc/localtime:/etc/localtime:ro

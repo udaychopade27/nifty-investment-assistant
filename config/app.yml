@@ -128,7 +128,7 @@ cache:
 realtime:
   # Realtime streaming is for intraday/options; not required for long-term investing.
   # Keep disabled unless you need live ticks and sub-minute PnL.
-  enabled: false
+  enabled: true
   bar_window: 240
   upstox_stream:
     ws_url: ''

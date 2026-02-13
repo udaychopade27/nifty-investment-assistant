@@ -18,6 +18,7 @@ from app.infrastructure.market_data.options.subscription_manager import OptionsS
 from app.infrastructure.market_data.options.chain_resolver import OptionsChainResolver
 from app.infrastructure.calendar.nse_calendar import NSECalendar
 from app.realtime.runtime import RealtimeRuntime
+from app.domain.services.ml_prediction_service import MLPredictionService
 from app.domain.options.state.market_state import MarketState
 from app.domain.options.services.candle_builder import CandleBuilder
 from app.domain.options.analytics.indicators import (
@@ -64,14 +65,17 @@ class OptionsRuntime:
         self._config_engine = config_engine
         self._realtime_runtime = realtime_runtime
         self._subscription_mgr = OptionsSubscriptionManager(config_engine)
+        self._ml_prediction_service = MLPredictionService()
         self._enabled = False
         self._market_state = MarketState()
         self._last_tick: Optional[Dict[str, Any]] = None
         self._key_to_symbol: Dict[str, str] = {}
         self._candles: Dict[str, CandleBuilder] = {}
         self._candles_5m: Dict[str, CandleBuilder] = {}
+        self._candles_15m: Dict[str, CandleBuilder] = {}
         self._history: Dict[str, deque] = {}
         self._history_5m: Dict[str, deque] = {}
+        self._history_15m: Dict[str, deque] = {}
         self._signal_history: Dict[str, deque] = {}
         self._strategy_cfg: Dict[str, Any] = {}
         self._option_instruments: Dict[str, Dict[str, Any]] = {}
@@ -335,6 +339,10 @@ class OptionsRuntime:
             if history_5m is None:
                 history_5m = deque(maxlen=300)
                 self._history_5m[symbol] = history_5m
+            history_15m = self._history_15m.get(symbol)
+            if history_15m is None:
+                history_15m = deque(maxlen=300)
+                self._history_15m[symbol] = history_15m
             signal_history = self._signal_history.get(symbol)
             if signal_history is None:
                 signal_history = deque(maxlen=50)
@@ -346,10 +354,13 @@ class OptionsRuntime:
                 candle_5m = self._update_5m_candle(symbol, candle)
                 if candle_5m:
                     history_5m.append(candle_5m)
-                indicator = self._compute_indicators(symbol, history, history_5m)
+                candle_15m = self._update_15m_candle(symbol, candle)
+                if candle_15m:
+                    history_15m.append(candle_15m)
+                indicator = self._compute_indicators(symbol, history, history_5m, history_15m)
                 if indicator:
                     self._market_state.indicators[f"1m:{symbol}"] = indicator
-                signal = self._compute_signal(symbol, indicator)
+                signal = await self._compute_signal(symbol, indicator)
                 if signal:
                     asyncio.create_task(self._process_signal(symbol, signal, indicator))
             current = builder.current()
@@ -461,11 +472,17 @@ class OptionsRuntime:
     def get_market_state(self) -> MarketState:
         return self._market_state
 
-    def _compute_indicators(self, symbol: str, history: deque, history_5m: deque) -> Optional[Dict[str, Any]]:
+    def _compute_indicators(self, symbol: str, history: deque, history_5m: deque, history_15m: deque) -> Optional[Dict[str, Any]]:
         closes = [c.close for c in history]
         volumes = [c.volume for c in history]
+        closes_15m = [c.close for c in history_15m]
+        
         ema_fast = ema(closes, int(self._strategy_cfg.get("ema_fast", 9)))
         ema_slow = ema(closes, int(self._strategy_cfg.get("ema_slow", 21)))
+        ema_15m = ema(closes_15m, 20) if len(closes_15m) >= 20 else None
+        ema_15m_prev = ema(closes_15m[:-1], 20) if len(closes_15m) >= 21 else None
+        ema_15m_slope = (ema_15m - ema_15m_prev) if ema_15m and ema_15m_prev else 0.0
+
         vwap_window = int(self._strategy_cfg.get("vwap_window", 20))
         vwap_value = vwap(closes[-vwap_window:], volumes[-vwap_window:])
         spike = volume_spike(
@@ -533,6 +550,9 @@ class OptionsRuntime:
             "rsi": rsi_value,
             "macd_hist": macd_hist,
             "boll_pos": boll_pos,
+            "ema_15m": ema_15m,
+            "ema_15m_slope": ema_15m_slope,
+            "vol_ma_20": sum(volumes[-20:]) / 20 if len(volumes) >= 20 else sum(volumes) / len(volumes) if volumes else 0.0
         }
         self._persist_oi_snapshot(symbol, indicator)
         return indicator
@@ -585,6 +605,13 @@ class OptionsRuntime:
         if not self._is_data_fresh(symbol, "PE"):
             score -= 0.15
         return round(max(0.0, min(1.0, score)), 3)
+
+    def _update_15m_candle(self, symbol: str, candle_1m) -> Optional[Any]:
+        builder = self._candles_15m.get(symbol)
+        if builder is None:
+            builder = CandleBuilder(interval_seconds=900)
+            self._candles_15m[symbol] = builder
+        return builder.update(candle_1m.ts, candle_1m.close, candle_1m.volume)
 
     def _update_5m_candle(self, symbol: str, candle_1m) -> Optional[Any]:
         builder = self._candles_5m.get(symbol)
@@ -1101,27 +1128,25 @@ class OptionsRuntime:
                 return base
         return base
 
-    def _compute_signal(self, symbol: str, indicator: Optional[Dict[str, Any]], overrides: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    async def _compute_signal(self, symbol: str, indicator: Optional[Dict[str, Any]], overrides: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         if not indicator:
-            return None
-        closes = indicator.get("close")
-        ema_fast = indicator.get("ema_fast")
-        ema_slow = indicator.get("ema_slow")
-        vwap_value = indicator.get("vwap")
-        if closes is None or ema_fast is None or ema_slow is None or vwap_value is None:
-            return None
-
-        history = self._history.get(symbol)
-        if not history or len(history) < 2:
             return None
 
         overrides = overrides or {}
-        signal_cfg = self._strategy_cfg.get("signal", {})
-        sl_pct = float(overrides.get("sl_pct", signal_cfg.get("sl_pct", 0.006)))
-        target_pct = float(overrides.get("target_pct", signal_cfg.get("target_pct", 0.012)))
-        min_rr = float(overrides.get("min_rr", signal_cfg.get("min_rr", 1.5)))
-        cooldown_minutes = int(overrides.get("cooldown_minutes", signal_cfg.get("cooldown_minutes", 5)))
+        force_direction = overrides.get("force_direction")
+        
+        # 1. Market hours / liquidity check
+        try:
+            ts_str = str(indicator.get("ts"))
+            ts = datetime.fromisoformat(ts_str) if ts_str else datetime.now(IST)
+        except Exception:
+            ts = datetime.now(IST)
+            
+        if force_direction is None and not self._is_market_open_for_signal(ts):
+            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "reasons": ["market_closed"]}
+            return None
 
+        # Determine Technical Bias
         signal_type = None
         close_5m = indicator.get("close_5m")
         vwap_5m = indicator.get("vwap_5m")
@@ -1130,221 +1155,108 @@ class OptionsRuntime:
                 signal_type = "BUY_CE"
             elif float(close_5m) < float(vwap_5m):
                 signal_type = "BUY_PE"
-        force_direction = overrides.get("force_direction")
+        
         if force_direction in ("BUY_CE", "BUY_PE"):
             signal_type = force_direction
+
         if not signal_type:
+            return None
+
+        # 2. ML Hard Gate (ensemble >= 0.65) ← FIRST prioritized filter
+        ml_score, ml_meta = await self._calculate_ensemble_score(symbol, signal_type, indicator)
+        min_ensemble = float(self._ml_pipeline_cfg.get("promotion_gates", {}).get("min_ensemble_score", 0.65))
+        
+        if force_direction is None and ml_score < min_ensemble:
             self._last_no_trade_reasons[symbol] = {
-                "symbol": symbol,
-                "ts": indicator.get("ts"),
-                "reasons": ["no_directional_setup", "missing_5m_confirmation"],
+                "symbol": symbol, 
+                "ts": indicator.get("ts"), 
+                "signal_type": signal_type, 
+                "reasons": [f"ml_gate_blocked:{ml_score}"]
             }
             return None
 
-        option_side = "CE" if signal_type == "BUY_CE" else "PE"
-        option_price = self._get_option_price(symbol, option_side)
-        if option_price is None:
-            self._last_no_trade_reasons[symbol] = {
-                "symbol": symbol,
-                "ts": indicator.get("ts"),
-                "signal_type": signal_type,
-                "reasons": ["no_option_price"],
-            }
-            return None
-        entry = option_price
-
-        if force_direction is None:
-            strict_failures = self._strict_gate_failures(symbol, indicator, signal_type)
-            if strict_failures:
-                self._last_no_trade_reasons[symbol] = {
-                    "symbol": symbol,
-                    "ts": indicator.get("ts"),
-                    "signal_type": signal_type,
-                    "reasons": strict_failures,
-                }
-                logger.info("Options signal blocked for %s: %s", symbol, ",".join(strict_failures))
+        # 3. MTF trend alignment (15m EMA)
+        ema_15m = indicator.get("ema_15m")
+        close_now = indicator.get("close")
+        if force_direction is None and ema_15m is not None:
+            if signal_type == "BUY_CE" and close_now < ema_15m:
+                self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "reasons": ["mtf_trend_resistance"]}
+                return None
+            if signal_type == "BUY_PE" and close_now > ema_15m:
+                self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "reasons": ["mtf_trend_support"]}
                 return None
 
-        # Market regime / time filters
-        try:
-            ts = datetime.fromisoformat(str(indicator.get("ts")))
-        except Exception:
-            ts = datetime.now(IST)
-        if force_direction is None and not self._is_market_open_for_signal(ts):
+        # 4. Volume participation check
+        vol_now = indicator.get("volume", 0)
+        vol_ma = indicator.get("vol_ma_20", 0)
+        if force_direction is None and vol_now < (vol_ma * 0.8):
+            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "reasons": ["low_volume_participation"]}
+            return None
+
+        # 5. Adaptive OI ratio
+        ce_change = abs(float(indicator.get("oi_change_ce") or 0.0))
+        pe_change = abs(float(indicator.get("oi_change_pe") or 0.0))
+        if force_direction is None:
+            if signal_type == "BUY_CE":
+                oi_ratio = pe_change / ce_change if ce_change > 0 else 10.0
+                if oi_ratio < 1.5:
+                    self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "reasons": ["weak_oi_ratio_ce"]}
+                    return None
+            elif signal_type == "BUY_PE":
+                oi_ratio = ce_change / pe_change if pe_change > 0 else 10.0
+                if oi_ratio < 1.5:
+                    self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "reasons": ["weak_oi_ratio_pe"]}
+                    return None
+
+        # 6. Technical confirmations (VWAP, delta, spread)
+        strict_failures = self._strict_gate_failures(symbol, indicator, signal_type)
+        if force_direction is None and strict_failures:
             self._last_no_trade_reasons[symbol] = {
                 "symbol": symbol,
                 "ts": indicator.get("ts"),
                 "signal_type": signal_type,
-                "reasons": ["market_closed"],
-            }
-            return None
-        if in_no_trade_window(ts, self._config_engine.get_options_setting("options", "risk", "no_trade_windows")):
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["time_window_block"]}
-            return None
-        if force_direction is None and bool(signal_cfg.get("require_atr", True)) and indicator.get("atr") is None:
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["atr_missing"]}
-            return None
-        if is_flat_regime(indicator.get("atr"), float(self._config_engine.get_options_setting("options", "risk", "flat_atr_threshold")), ema_fast, ema_slow):
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["flat_regime"]}
-            return None
-
-        # Trend strength & candle quality
-        min_slope = float(signal_cfg.get("min_ema_slope", 0.02))
-        if force_direction is None and indicator.get("ema_slope") is not None and abs(indicator.get("ema_slope")) < min_slope:
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["weak_ema_slope"]}
-            return None
-        cq = candle_quality(indicator.get("open"), indicator.get("high"), indicator.get("low"), indicator.get("close"), signal_type)
-        if force_direction is None and cq < float(signal_cfg.get("candle_quality_min", 0.55)):
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["poor_candle_quality"]}
-            return None
-
-        # OI + volume confirmation
-        require_oi = bool(signal_cfg.get("oi_confirm_required", True))
-        if force_direction is None and not oi_volume_confirm(
-            indicator.get("oi_change"),
-            indicator.get("volume_spike"),
-            require_oi,
-            signal_type=signal_type,
-        ):
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["oi_volume_not_confirmed"]}
-            return None
-
-        # Cooldown per symbol+signal (skip if forced)
-        last_ts = self._last_signal_ts.get(f"{symbol}:{signal_type}")
-        now_ist = datetime.now(IST)
-        if isinstance(last_ts, datetime) and last_ts.tzinfo is None:
-            last_ts = last_ts.replace(tzinfo=IST)
-        if force_direction is None and last_ts and (now_ist - last_ts).total_seconds() < cooldown_minutes * 60:
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["cooldown_active"]}
-            return None
-        # We are long options in both cases (CE or PE), so
-        # option-price target must be above entry and stop below entry.
-        sl, target = compute_sl_tp(entry, indicator.get("atr"), signal_cfg)
-        est_profit = target - entry
-
-        risk = abs(entry - sl)
-        reward = abs(target - entry)
-        rr = (reward / risk) if risk > 0 else 0
-        min_risk_per_unit = float(signal_cfg.get("min_risk_per_unit", 0.5))
-        max_risk_per_unit = float(signal_cfg.get("max_risk_per_unit", 120.0))
-        if force_direction is None and (risk < min_risk_per_unit or risk > max_risk_per_unit):
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["risk_per_unit_out_of_bounds"]}
-            return None
-        if force_direction is None and rr < min_rr:
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["rr_below_threshold"]}
-            return None
-        est_cost_per_unit = self._compute_trade_costs(entry, target, 1)
-        expected_edge = reward - est_cost_per_unit
-        score_cfg_local = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
-        min_edge = float(score_cfg_local.get("min_expected_edge_after_costs", 0.15))
-        if force_direction is None and expected_edge < min_edge:
-            self._last_no_trade_reasons[symbol] = {
-                "symbol": symbol,
-                "ts": indicator.get("ts"),
-                "signal_type": signal_type,
-                "reasons": ["edge_after_costs_too_low"],
-                "expected_edge": round(expected_edge, 3),
+                "reasons": strict_failures,
             }
             return None
 
-        # Base confidence gate before risk booking / alerting.
-        pre_signal = {
-            "symbol": symbol,
-            "signal": signal_type,
-            "entry": round(entry, 2),
-            "stop_loss": round(sl, 2),
-            "target": round(target, 2),
-            "rr": round(rr, 2),
-        }
-        score_cfg = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
-        intraday_window = score_cfg.get("intraday_window", ["09:45", "13:30"])
-        if not isinstance(intraday_window, list) or len(intraday_window) != 2:
-            intraday_window = ["09:45", "13:30"]
-        event_risk_blocked = bool(indicator.get("event_risk_blocked", False))
-        confidence_score, confidence_breakdown = calculate_confidence_score(
-            signal_type=signal_type,
-            indicator=indicator,
-            weights=score_cfg.get("weights") if isinstance(score_cfg.get("weights"), dict) else None,
-            event_risk_blocked=event_risk_blocked,
-            intraday_window=(str(intraday_window[0]), str(intraday_window[1])),
-        )
-        min_project_score = self._effective_project_min_score(score_cfg, indicator)
-        if force_direction is None and confidence_score < min_project_score:
-            self._last_no_trade_reasons[symbol] = {
-                "symbol": symbol,
-                "ts": indicator.get("ts"),
-                "signal_type": signal_type,
-                "reasons": ["project_confidence_below_threshold"],
-                "confidence_score": confidence_score,
-                "required_min": min_project_score,
-                "breakdown": confidence_breakdown,
-            }
+        # 7. ATR-based SL calculation
+        atr = indicator.get("atr")
+        if atr is None:
+            sl_pct = 0.006 # Fallback
+            target_pct = 0.012
+        else:
+            # Production ATR Multipliers: 1.5x for SL, 3.0x for TP
+            sl_pct = (1.5 * float(atr)) / close_now
+            target_pct = (3.0 * float(atr)) / close_now
+
+        option_side = "CE" if signal_type == "BUY_CE" else "PE"
+        entry = self._get_option_price(symbol, option_side)
+        if entry is None:
+            return None
+            
+        sl_abs = round(entry * (1 - sl_pct), 2) if signal_type == "BUY_CE" else round(entry * (1 + sl_pct), 2)
+        target_abs = round(entry * (1 + target_pct), 2) if signal_type == "BUY_CE" else round(entry * (1 + target_pct), 2) # CE/PE both look for premium rise
+
+        # 8. Risk & capital checks
+        risk_amt = abs(entry - sl_abs)
+        qty = position_size(self._get_monthly_capital(), risk_amt)
+        if qty <= 0:
+            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "reasons": ["insufficient_capital"]}
             return None
 
-        min_conf = float(signal_cfg.get("min_confidence", 0.62))
-        base_conf = rule_based_confidence(pre_signal, indicator)
-        if force_direction is None and base_conf < min_conf:
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["confidence_below_threshold"], "base_confidence": round(base_conf, 3)}
-            return None
-        features = build_features(pre_signal, indicator)
-        model_features = self._build_options_ml_features(symbol, indicator)
-        feature_version = str(self._ml_pipeline_cfg.get("feature_version", "v1"))
-        features["data_quality_score"] = float(indicator.get("data_quality_score") or 0.0)
-        features["regime_trending"] = 1.0 if str(indicator.get("regime", "Range")) == "Trending" else 0.0
-        ml_score = self._learner.predict(features)
-        ml_mode = str(self._ml_pipeline_cfg.get("mode", "gate")).lower()
-
-        # Risk limits
-        if not self._risk_allows(risk):
-            self._metrics["risk_blocks"] = float(self._metrics.get("risk_blocks", 0)) + 1
-            self._metrics["signals_blocked"] = float(self._metrics.get("signals_blocked", 0)) + 1
-            self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": ["risk_limits"]}
-            self._record_audit("signal_blocked", {"symbol": symbol, "signal": signal_type, "reason": "risk_limits", "ts": indicator.get("ts")})
-            return {
-                "symbol": symbol,
-                "signal": signal_type,
-                "ts": indicator.get("ts"),
-                "entry": round(entry, 2),
-                "stop_loss": round(sl, 2),
-                "target": round(target, 2),
-                "estimated_profit_per_unit": round(est_profit, 2),
-                "rr": round(rr, 2),
-                "blocked": True,
-                "reason": "risk_limits",
-            }
-
-        qty = position_size(entry, sl, signal_cfg)
-        signal = {
+        # 9. Execute trade (Return Signal Object)
+        return {
             "symbol": symbol,
             "signal": signal_type,
             "ts": indicator.get("ts"),
             "entry": round(entry, 2),
-            "stop_loss": round(sl, 2),
-            "target": round(target, 2),
-            "estimated_profit_per_unit": round(est_profit, 2),
-            "rr": round(rr, 2),
-            "blocked": False,
-            "entry_source": "option_ltp",
+            "stop_loss": round(sl_abs, 2),
+            "target": round(target_abs, 2),
             "qty": qty,
-            "estimated_cost_per_unit": round(est_cost_per_unit, 2),
-            "expected_edge_after_costs": round(expected_edge, 2),
-            "atr": indicator.get("atr"),
-            "pcr": indicator.get("pcr"),
-            "spread_ce_pct": indicator.get("spread_ce_pct"),
-            "spread_pe_pct": indicator.get("spread_pe_pct"),
-            "confidence_base": base_conf,
-            "confidence_score": confidence_score,
-            "confidence_breakdown": confidence_breakdown,
-            "ml_score": round(ml_score, 3),
-            "ml_mode": ml_mode,
-            "feature_version": feature_version,
-            "_ml_features": features,
-            "_ml_model_features": model_features,
+            "ml_score": ml_score,
+            "ml_meta": ml_meta,
+            "_ml_model_features": ml_meta.get("features")
         }
-        self._metrics["signals_generated"] = float(self._metrics.get("signals_generated", 0)) + 1
-        self._last_signal_ts[f"{symbol}:{signal_type}"] = datetime.now(IST)
-        self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "signal_type": signal_type, "reasons": []}
-        return signal
 
     def _risk_allows(self, risk: float) -> bool:
         self._refresh_risk_state()
@@ -1885,7 +1797,7 @@ class OptionsRuntime:
             "ml": self._learner.status(),
         }
 
-    def force_signal(self, symbol: str, overrides: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    async def force_signal(self, symbol: str, overrides: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         indicator = self._market_state.indicators.get(f"1m:{symbol}")
         if not indicator:
             # Build a minimal indicator from current candle or spot for testing
@@ -1911,9 +1823,9 @@ class OptionsRuntime:
                 "volume_spike": None,
                 "oi_change": None,
             }
-        return self._compute_signal(symbol, indicator, overrides=overrides)
+        return await self._compute_signal(symbol, indicator, overrides=overrides)
 
-    def force_signal_debug(self, symbol: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def force_signal_debug(self, symbol: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         overrides = overrides or {}
         if bool(self._execution_cfg.get("block_when_market_closed", True)) and not self._is_market_open_now():
             return {"signal": None, "reason": "market_closed"}
@@ -1947,11 +1859,11 @@ class OptionsRuntime:
             opt_price = self._get_option_price(symbol, side)
             if opt_price is None:
                 return {"signal": None, "reason": "no_option_price"}
-            forced = self._build_forced_signal(symbol, indicator, force_direction, overrides, opt_price)
+            forced = await self._build_forced_signal(symbol, indicator, force_direction, overrides, opt_price)
             if forced:
-                asyncio.create_task(self._process_signal(symbol, forced, indicator))
+                await self._process_signal(symbol, forced, indicator)
                 return {"signal": forced, "reason": None}
-        signal = self._compute_signal(symbol, indicator, overrides=overrides)
+        signal = await self._compute_signal(symbol, indicator, overrides=overrides)
         if not signal:
             # Provide quick debug snapshot
             side = "CE" if force_direction == "BUY_CE" else "PE"
@@ -2264,6 +2176,31 @@ class OptionsRuntime:
         except Exception as exc:
             return None, {"available": False, "reason": f"prediction_failed:{exc}"}
 
+    async def _calculate_ensemble_score(self, symbol: str, signal_type: str, indicator: Dict[str, Any]) -> tuple[float, Dict[str, Any]]:
+        features = self._build_options_ml_features(symbol, indicator)
+        setup_score, model_meta = self._compute_options_ml_score(signal_type, features)
+        
+        market_adj = self._ml_prediction_service.get_ml_confidence_adjustment(
+            symbol=symbol,
+            price_data=[c.close for c in list(self._history.get(symbol, []))[-100:]]
+        )
+        
+        market_weight = float(self._ml_pipeline_cfg.get("blending", {}).get("market_weight", 0.4))
+        setup_weight = float(self._ml_pipeline_cfg.get("blending", {}).get("setup_weight", 0.6))
+        
+        if setup_score is None:
+            ensemble_score = market_adj
+        else:
+            ensemble_score = (market_weight * market_adj) + (setup_weight * setup_score)
+            
+        return round(ensemble_score, 3), {
+            "ensemble": round(ensemble_score, 3),
+            "market_adj": round(market_adj, 3),
+            "setup_score": round(setup_score, 3) if setup_score is not None else None,
+            "meta": model_meta,
+            "features": features
+        }
+
     def _read_options_ml_training_rows(self, samples_path: str) -> list[tuple[datetime, Dict[str, float], int]]:
         path = Path(samples_path)
         if not path.exists():
@@ -2426,7 +2363,7 @@ class OptionsRuntime:
                 return True
         return False
 
-    def _build_forced_signal(
+    async def _build_forced_signal(
         self,
         symbol: str,
         indicator: Dict[str, Any],
@@ -2434,40 +2371,7 @@ class OptionsRuntime:
         overrides: Dict[str, Any],
         option_price: float,
     ) -> Optional[Dict[str, Any]]:
-        signal_cfg = self._strategy_cfg.get("signal", {})
-        sl_pct = float(overrides.get("sl_pct", signal_cfg.get("sl_pct", 0.006)))
-        target_pct = float(overrides.get("target_pct", signal_cfg.get("target_pct", 0.012)))
-        entry = float(option_price)
-        score_cfg = ((self._project_cfg.get("confidence") or {}) if isinstance(self._project_cfg, dict) else {})
-        intraday_window = score_cfg.get("intraday_window", ["09:45", "13:30"])
-        if not isinstance(intraday_window, list) or len(intraday_window) != 2:
-            intraday_window = ["09:45", "13:30"]
-        confidence_score, confidence_breakdown = calculate_confidence_score(
-            signal_type=force_direction,
-            indicator=indicator,
-            weights=score_cfg.get("weights") if isinstance(score_cfg.get("weights"), dict) else None,
-            event_risk_blocked=bool(indicator.get("event_risk_blocked", False)),
-            intraday_window=(str(intraday_window[0]), str(intraday_window[1])),
-        )
-        # Forced signals also represent long options in both directions.
-        sl = entry * (1 - sl_pct)
-        target = entry * (1 + target_pct)
-        est_profit = target - entry
-        return {
-            "symbol": symbol,
-            "signal": force_direction,
-            "ts": indicator.get("ts"),
-            "entry": round(entry, 2),
-            "stop_loss": round(sl, 2),
-            "target": round(target, 2),
-            "estimated_profit_per_unit": round(est_profit, 2),
-            "rr": round(abs(target - entry) / abs(entry - sl), 2) if entry != sl else 0,
-            "blocked": False,
-            "entry_source": "option_ltp",
-            "forced": True,
-            "confidence_score": confidence_score,
-            "confidence_breakdown": confidence_breakdown,
-        }
+        return await self._compute_signal(symbol, indicator, {**overrides, "force_direction": force_direction})
 
     def _maybe_end_of_day(self, ts: datetime) -> None:
         try:
@@ -2610,6 +2514,25 @@ class OptionsRuntime:
             signal["ml_confidence_score"] = round(model_score * 100.0, 2)
         signal["ml_model"] = model_meta
 
+        # Market-Level ML Adjustment (Consolidated Integration)
+        market_data = {
+            "historical_prices": [c.close for c in list(self._history.get(symbol, []))[-100:]],
+            "historical_volumes": [c.volume for c in list(self._history.get(symbol, []))[-100:]]
+        }
+        vix_current = self._market_state.spot.get("INDIAVIX")
+        vix_data = None
+        if vix_current is not None:
+            vix_data = {"current": float(vix_current), "change_pct": 0.0, "percentile": 0.5}
+
+        market_adj = self._ml_prediction_service.get_ml_confidence_adjustment(
+            symbol, str(signal.get("signal", "")), market_data, vix_data
+        )
+        signal["ml_market_adjustment"] = round(market_adj, 3)
+
+        # Market Score from Prediction Service (for blending)
+        ml_market_conf, _ = self._ml_prediction_service.predict(symbol, market_data, vix_data)
+        market_score = (ml_market_conf / 100.0) if ml_market_conf is not None else 0.5
+
         confidence = signal.get("confidence_base")
         if confidence is None:
             confidence = rule_based_confidence(signal, indicator)
@@ -2618,11 +2541,26 @@ class OptionsRuntime:
             confidence = max(0.0, min(1.0, round(confidence + adj, 3)))
         signal["confidence"] = confidence
         signal["confidence_project"] = signal.get("confidence_score")
+        
+        # Blending logic (40% Market, 60% Setup/Trade)
         if model_score is not None:
             blend_weight = float(self._ml_pipeline_cfg.get("confidence_blend_weight", 0.35))
             blend_weight = max(0.0, min(1.0, blend_weight))
-            signal["confidence_with_ml"] = round(((1.0 - blend_weight) * float(confidence)) + (blend_weight * float(model_score)), 3)
+            
+            # Setup score is the trade-specific model
+            setup_score = float(model_score)
+            
+            # Calculate final ML ensemble score
+            market_weight = 0.4
+            setup_weight = 0.6
+            ensemble_ml_score = (market_weight * market_score) + (setup_weight * setup_score)
+            
+            signal["ensemble_ml_score"] = round(ensemble_ml_score, 3)
+            
+            # Blend ensemble with rule-based confidence
+            signal["confidence_with_ml"] = round(((1.0 - blend_weight) * float(confidence)) + (blend_weight * ensemble_ml_score), 3)
         else:
+            signal["ensemble_ml_score"] = None
             signal["confidence_with_ml"] = None
         min_conf = float(self._strategy_cfg.get("signal", {}).get("min_confidence", 0.62))
         if not signal.get("forced") and confidence < min_conf:

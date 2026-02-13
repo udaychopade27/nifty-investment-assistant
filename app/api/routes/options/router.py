@@ -438,7 +438,7 @@ async def options_force_signal(
         overrides["cooldown_minutes"] = cooldown_minutes
     if force_direction is not None:
         overrides["force_direction"] = force_direction
-    result = runtime.force_signal_debug(symbol, overrides=overrides or None)
+    result = await runtime.force_signal_debug(symbol, overrides=overrides or None)
     return {"symbol": symbol, **result}
 
 
@@ -461,7 +461,7 @@ async def options_replay_signal(
         if fd not in ("BUY_CE", "BUY_PE"):
             raise HTTPException(status_code=400, detail="force_direction must be BUY_CE or BUY_PE")
         overrides["force_direction"] = fd
-    result = runtime.force_signal_debug(payload.symbol, overrides=overrides or None)
+    result = await runtime.force_signal_debug(payload.symbol, overrides=overrides or None)
     return {"symbol": payload.symbol, **result}
 
 
