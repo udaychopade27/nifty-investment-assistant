@@ -92,10 +92,3 @@ class OptionsSubscriptionManager:
         options_cfg = self._config_engine.get_options_setting("options")
         md_cfg = options_cfg.get("market_data", {}) or {}
         return str(md_cfg.get("realtime_key_mode", "combined"))
-
-    def get_subscription_mode(self) -> str:
-        if not self.is_enabled():
-            return "ltp"
-        options_cfg = self._config_engine.get_options_setting("options")
-        md_cfg = options_cfg.get("market_data", {}) or {}
-        return str(md_cfg.get("subscription_mode", "ltp"))

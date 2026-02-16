@@ -1874,10 +1874,43 @@ class OptionsRuntime:
         return {"signal": signal, "reason": None}
 
     def get_no_trade_diagnostics(self) -> Dict[str, Any]:
+        now = datetime.now(IST)
+        max_spot_age = int(self._data_quality_cfg.get("max_spot_tick_age_seconds", 20))
+        stale_threshold = max(60, max_spot_age * 3)
+        diagnostics: Dict[str, Dict[str, Any]] = {}
+
+        for symbol in sorted(self._allowed_symbols):
+            entry = dict(self._last_no_trade_reasons.get(symbol) or {"symbol": symbol, "ts": None, "reasons": ["no_diagnostics_yet"]})
+            reasons = list(entry.get("reasons") or [])
+            ts_value = entry.get("ts")
+            ts_dt: Optional[datetime] = None
+            age_seconds: Optional[int] = None
+            try:
+                ts_dt = datetime.fromisoformat(str(ts_value))
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=IST)
+                else:
+                    ts_dt = ts_dt.astimezone(IST)
+            except Exception:
+                ts_dt = None
+            if ts_dt is not None:
+                age_seconds = max(0, int((now - ts_dt).total_seconds()))
+            stale = age_seconds is None or age_seconds > stale_threshold
+            if stale and "stale_indicator" not in reasons:
+                reasons.append("stale_indicator")
+            entry["reasons"] = reasons
+            entry["age_seconds"] = age_seconds
+            entry["stale"] = stale
+            diagnostics[symbol] = entry
+
         return {
             "enabled": self._enabled,
             "symbols": sorted(self._allowed_symbols),
-            "diagnostics": self._last_no_trade_reasons,
+            "generated_at": now.isoformat(),
+            "market_open_now": self._is_market_open_now(),
+            "stale_threshold_seconds": stale_threshold,
+            "last_tick": self._last_tick,
+            "diagnostics": diagnostics,
         }
 
     def get_strike_selection_debug(self, symbol: Optional[str] = None, side: Optional[str] = None) -> Dict[str, Any]:
@@ -2169,11 +2202,25 @@ class OptionsRuntime:
     async def _calculate_ensemble_score(self, symbol: str, signal_type: str, indicator: Dict[str, Any]) -> tuple[float, Dict[str, Any]]:
         features = self._build_options_ml_features(symbol, indicator)
         setup_score, model_meta = self._compute_options_ml_score(signal_type, features)
-        
-        market_adj = self._ml_prediction_service.get_ml_confidence_adjustment(
-            symbol=symbol,
-            price_data=[c.close for c in list(self._history.get(symbol, []))[-100:]]
-        )
+
+        market_data = {
+            "historical_prices": [c.close for c in list(self._history.get(symbol, []))[-100:]],
+            "historical_volumes": [c.volume for c in list(self._history.get(symbol, []))[-100:]],
+        }
+        vix_current = self._market_state.spot.get("INDIAVIX")
+        vix_data = None
+        if vix_current is not None:
+            vix_data = {"current": float(vix_current), "change_pct": 0.0, "percentile": 0.5}
+        try:
+            market_adj = self._ml_prediction_service.get_ml_confidence_adjustment(
+                symbol,
+                signal_type,
+                market_data,
+                vix_data,
+            )
+        except Exception as exc:
+            logger.warning("market adjustment failed for %s: %s", symbol, exc)
+            market_adj = 0.0
         
         market_weight = float(self._ml_pipeline_cfg.get("blending", {}).get("market_weight", 0.4))
         setup_weight = float(self._ml_pipeline_cfg.get("blending", {}).get("setup_weight", 0.6))
