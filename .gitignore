@@ -93,5 +93,7 @@ data/options_runtime_state.json
 
 # Local runtime/training artifacts (keep local, do not commit)
 models/*.joblib
+models/archive/
+models/*metadata.json
 data/options_*.json
 data/options_*.jsonl

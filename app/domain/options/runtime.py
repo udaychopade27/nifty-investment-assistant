@@ -1159,11 +1159,14 @@ class OptionsRuntime:
         if not signal_type:
             return None
 
-        # 2. ML Hard Gate (ensemble >= 0.65) ← FIRST prioritized filter
+        # 2. ML Hard Gate (ensemble >= threshold)
         ml_score, ml_meta = await self._calculate_ensemble_score(symbol, signal_type, indicator)
         min_ensemble = float(self._ml_pipeline_cfg.get("promotion_gates", {}).get("min_ensemble_score", 0.65))
-        
-        if force_direction is None and ml_score < min_ensemble:
+        ml_mode = str(self._ml_pipeline_cfg.get("mode", "gate")).lower()
+        setup_score = ml_meta.get("setup_score")
+        enforce_ml_gate = ml_mode not in ("shadow", "off", "disabled") and setup_score is not None
+
+        if force_direction is None and enforce_ml_gate and ml_score < min_ensemble:
             self._last_no_trade_reasons[symbol] = {
                 "symbol": symbol, 
                 "ts": indicator.get("ts"), 
