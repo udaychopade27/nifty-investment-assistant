@@ -244,12 +244,12 @@ class DecisionService:
     
     async def get_today_decision(self) -> Optional[Tuple[DailyDecision, List[ETFDecision]]]:
         """
-        Get today's decision if it exists
+        Get current active decision (today's or most recent).
         
         Returns:
             Tuple of (DailyDecision, ETFDecisions) or None
         """
-        daily_decision = await self.daily_decision_repo.get_today()
+        daily_decision = await self.daily_decision_repo.get_active_decision()
         
         if not daily_decision:
             return None

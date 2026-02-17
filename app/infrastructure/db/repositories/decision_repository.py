@@ -88,6 +88,27 @@ class DailyDecisionRepository:
         """
         return await self.get_for_date(date.today())
     
+    async def get_active_decision(self) -> Optional[DailyDecision]:
+        """
+        Get the currently active decision.
+        Returns today's decision if it exists, otherwise the most recent decision.
+        Allows signals to persist until a newer one is generated.
+        """
+        # Try today first
+        today_decision = await self.get_today()
+        if today_decision:
+            return today_decision
+        
+        # Fallback to most recent
+        result = await self.session.execute(
+            select(DailyDecisionModel)
+            .order_by(DailyDecisionModel.date.desc())
+            .limit(1)
+            .options(selectinload(DailyDecisionModel.etf_decisions))
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+    
     async def get_recent(self, limit: int = 30) -> List[DailyDecision]:
         """
         Get recent decisions

@@ -78,7 +78,7 @@ async def get_today_decision(db: AsyncSession = Depends(get_db)):
     decision_repo = DailyDecisionRepository(db)
     etf_repo = ETFDecisionRepository(db)
     
-    decision = await decision_repo.get_today()
+    decision = await decision_repo.get_active_decision()
     
     if not decision:
         raise HTTPException(
@@ -214,7 +214,7 @@ async def execute_investment(
             today = date.today()
 
             daily_repo = DailyDecisionRepository(db)
-            daily_decision = await daily_repo.get_today()
+            daily_decision = await daily_repo.get_active_decision()
 
             if not daily_decision:
                 raise HTTPException(
