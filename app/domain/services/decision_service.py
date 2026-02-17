@@ -212,6 +212,7 @@ class DecisionService:
             index_metrics_by_etf=index_metrics_by_etf,
             deploy_base_daily=False
         )
+
         
         logger.info(f"✅ Decision: {daily_decision.decision_type.value}, Amount: ₹{daily_decision.actual_investable_amount:,.2f}")
         

@@ -62,7 +62,27 @@ class OptionsChainResolver:
                 chain = await self._get_option_chain(api_base, headers, underlying_key, expiry)
                 if not chain:
                     continue
-                spot = chain.get("underlying_price") or chain.get("underlyingPrice") or chain.get("spot_price") or chain.get("spotPrice")
+                spot = (
+                    chain.get("underlying_price") or 
+                    chain.get("underlyingPrice") or 
+                    chain.get("underlying_spot_price") or
+                    chain.get("spot_price") or 
+                    chain.get("spotPrice")
+                )
+                if spot is None:
+                    # Try getting from the first entry of the chain
+                    entries = chain.get("data") or chain.get("option_chain") or []
+                    if entries and isinstance(entries, list) and len(entries) > 0:
+                        first = entries[0]
+                        if isinstance(first, dict):
+                            spot = (
+                                first.get("underlying_price") or 
+                                first.get("underlyingPrice") or 
+                                first.get("underlying_spot_price") or
+                                first.get("spot_price") or 
+                                first.get("spotPrice")
+                            )
+
                 if spot is None:
                     spot = await self._get_spot_price(api_base, instrument_map, underlying, underlying_key)
                 ctx = {"expiry": expiry, "chain": chain, "spot": spot}
@@ -243,15 +263,27 @@ class OptionsChainResolver:
                 results.append(debug_item)
                 continue
 
-            spot = chain.get("underlying_price")
-            if strike == "ATM" and spot is not None and step > 0:
-                strike_val = round(float(spot) / step) * step
-            else:
-                try:
-                    strike_val = float(strike)
-                except Exception:
-                    results.append(debug_item)
-                    continue
+            spot = (
+                chain.get("underlying_price") or 
+                chain.get("underlyingPrice") or 
+                chain.get("underlying_spot_price") or
+                chain.get("spot_price") or 
+                chain.get("spotPrice")
+            )
+            if spot is None:
+                entries = chain.get("data") or chain.get("option_chain") or []
+                if entries and isinstance(entries, list) and len(entries) > 0:
+                    first = entries[0]
+                    if isinstance(first, dict):
+                        spot = (
+                            first.get("underlying_price") or 
+                            first.get("underlyingPrice") or 
+                            first.get("underlying_spot_price") or
+                            first.get("spot_price") or 
+                            first.get("spotPrice")
+                        )
+
+            strike_val = self._resolve_target_strike(strike, step, spot)
             debug_item["atm_strike"] = strike_val
 
             token_key, _ = self._pick_instrument(chain, strike_val, side)
