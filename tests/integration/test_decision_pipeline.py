@@ -90,7 +90,7 @@ async def test_decision_pipeline_tactical_only(db_session):
         base_allocation=config_engine.base_allocation,
         tactical_allocation=config_engine.tactical_allocation,
         strategy_version=config_engine.strategy_version,
-        dip_thresholds=config_engine.get_rule("dip_thresholds"),
+        dip_thresholds=config_engine.get_rule(),
     )
 
     etf_symbols = [etf.symbol for etf in config_engine.etf_universe.etfs if etf.is_active]

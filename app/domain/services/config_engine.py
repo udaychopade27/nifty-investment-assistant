@@ -235,7 +235,12 @@ class ConfigEngine:
         """Get rule value by nested keys"""
         if self._rules is None:
             raise RuntimeError("Config not loaded. Call load_all() first")
-        
+
+        # Backward compatibility: legacy callers requested "dip_thresholds".
+        # Current schema stores tactical dip config under top-level rules.
+        if len(keys) == 1 and keys[0] == "dip_thresholds" and "dip_thresholds" not in self._rules:
+            return self._rules
+
         value = self._rules
         for key in keys:
             value = value[key]

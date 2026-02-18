@@ -1239,7 +1239,7 @@ class OptionsRuntime:
 
         # 8. Risk & capital checks
         risk_amt = abs(entry - sl_abs)
-        qty = position_size(self._get_monthly_capital(), risk_amt)
+        qty = position_size(entry, sl_abs, self._strategy_cfg.get("signal", {}))
         if qty <= 0:
             self._last_no_trade_reasons[symbol] = {"symbol": symbol, "ts": indicator.get("ts"), "reasons": ["insufficient_capital"]}
             return None
@@ -2503,6 +2503,7 @@ class OptionsRuntime:
             self._metrics["signals_persisted"] = float(self._metrics.get("signals_persisted", 0)) + 1
 
     async def _process_signal(self, symbol: str, signal: Dict[str, Any], indicator: Dict[str, Any]) -> None:
+        self._metrics["signals_generated"] = float(self._metrics.get("signals_generated", 0)) + 1
         side = "CE" if signal.get("signal") == "BUY_CE" else "PE"
         meta = self._get_option_meta(symbol, side)
         signal["option_side"] = side
@@ -2605,7 +2606,24 @@ class OptionsRuntime:
         min_conf = float(self._strategy_cfg.get("signal", {}).get("min_confidence", 0.62))
         if not signal.get("forced") and confidence < min_conf:
             self._metrics["signals_blocked"] = float(self._metrics.get("signals_blocked", 0)) + 1
-            self._record_audit("signal_blocked", {"symbol": symbol, "signal": signal.get("signal"), "reason": "confidence_post_adjustment"})
+            self._record_audit(
+                "signal_blocked",
+                {
+                    "symbol": symbol,
+                    "signal": signal.get("signal"),
+                    "reason": "confidence_post_adjustment",
+                    "confidence": confidence,
+                    "min_confidence": min_conf,
+                    "confidence_project": signal.get("confidence_project"),
+                    "confidence_with_ml": signal.get("confidence_with_ml"),
+                    "ensemble_ml_score": signal.get("ensemble_ml_score"),
+                    "ml_score": signal.get("ml_score"),
+                    "entry": signal.get("entry"),
+                    "stop_loss": signal.get("stop_loss"),
+                    "target": signal.get("target"),
+                    "ts": signal.get("ts"),
+                },
+            )
             return
 
         precheck_failures = self._execution_precheck_failures(signal)
@@ -2614,7 +2632,23 @@ class OptionsRuntime:
                 self._metrics["execution_duplicates_blocked"] = float(self._metrics.get("execution_duplicates_blocked", 0)) + 1
             self._metrics["execution_precheck_blocked"] = float(self._metrics.get("execution_precheck_blocked", 0)) + 1
             self._metrics["signals_blocked"] = float(self._metrics.get("signals_blocked", 0)) + 1
-            self._record_audit("signal_blocked", {"symbol": symbol, "signal": signal.get("signal"), "reason": ",".join(precheck_failures)})
+            self._record_audit(
+                "signal_blocked",
+                {
+                    "symbol": symbol,
+                    "signal": signal.get("signal"),
+                    "reason": ",".join(precheck_failures),
+                    "confidence": signal.get("confidence"),
+                    "confidence_project": signal.get("confidence_project"),
+                    "confidence_with_ml": signal.get("confidence_with_ml"),
+                    "ensemble_ml_score": signal.get("ensemble_ml_score"),
+                    "ml_score": signal.get("ml_score"),
+                    "entry": signal.get("entry"),
+                    "stop_loss": signal.get("stop_loss"),
+                    "target": signal.get("target"),
+                    "ts": signal.get("ts"),
+                },
+            )
             return
 
         self._mark_signal_processed(signal)
