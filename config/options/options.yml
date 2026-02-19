@@ -1,5 +1,11 @@
 options:
   enabled: true
+  strategy_profile: default
+  strategies:
+    intraday_consensus_v2:
+      enabled: false
+      mode: shadow
+      priority: 20
   symbols:
   - NIFTY
   - BANKNIFTY

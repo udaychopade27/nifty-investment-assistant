@@ -14,10 +14,11 @@ RULES:
 ✅ Deterministic output
 """
 
+import os
 import yaml
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Any
 from dataclasses import dataclass
 
 from app.domain.models import (
@@ -175,6 +176,45 @@ class ConfigEngine:
 
         with open(options_file, 'r') as f:
             self._options_config = yaml.safe_load(f)
+
+        self._apply_options_strategy_profile()
+
+    def _deep_merge_dicts(self, base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """Deep-merge override into base (override wins)."""
+        merged = dict(base or {})
+        for key, value in (override or {}).items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = self._deep_merge_dicts(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    def _apply_options_strategy_profile(self) -> None:
+        """
+        Optionally apply a profile override from options/strategies/*.yml.
+        Priority:
+        1) ENV: OPTIONS_STRATEGY_PROFILE
+        2) options.strategy_profile in options.yml
+        """
+        options_root = (self._options_config or {}).get("options", {})
+        profile = os.getenv("OPTIONS_STRATEGY_PROFILE") or options_root.get("strategy_profile")
+        if not profile or str(profile).lower() in ("default", "base", "none"):
+            return
+
+        profile_file = self.config_dir / "options" / "strategies" / f"{profile}.yml"
+        if not profile_file.exists():
+            raise FileNotFoundError(f"Options strategy profile not found: {profile_file}")
+
+        with open(profile_file, 'r') as f:
+            profile_data = yaml.safe_load(f) or {}
+
+        profile_options = profile_data.get("options")
+        if not isinstance(profile_options, dict):
+            raise ValueError(
+                f"Invalid strategy profile format in {profile_file}. Expected top-level 'options' mapping."
+            )
+
+        self._options_config = self._deep_merge_dicts(self._options_config, {"options": profile_options})
     
     def _validate_all(self) -> None:
         """Validate all configurations"""

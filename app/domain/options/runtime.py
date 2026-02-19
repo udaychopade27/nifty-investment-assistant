@@ -1002,25 +1002,34 @@ class OptionsRuntime:
         failures: list[str] = []
         if not self._strict_cfg:
             return failures
+        confirmation_cfg = (self._project_cfg.get("confirmation", {}) if isinstance(self._project_cfg, dict) else {}) or {}
 
         close_5m = indicator.get("close_5m")
         vwap_5m = indicator.get("vwap_5m")
-        if close_5m is None or vwap_5m is None:
-            failures.append("missing_5m_confirmation")
-        else:
-            if signal_type == "BUY_CE" and not (float(close_5m) > float(vwap_5m)):
-                failures.append("vwap_5m_not_bullish")
-            if signal_type == "BUY_PE" and not (float(close_5m) < float(vwap_5m)):
-                failures.append("vwap_5m_not_bearish")
+        vwap5_cfg = confirmation_cfg.get("vwap_5m", {}) if isinstance(confirmation_cfg.get("vwap_5m"), dict) else {}
+        vwap_enabled = self._is_enabled(vwap5_cfg, "enabled", True)
+        vwap_strict = self._is_enabled(vwap5_cfg, "strict", True)
+        if vwap_enabled:
+            if close_5m is None or vwap_5m is None:
+                if vwap_strict:
+                    failures.append("missing_5m_confirmation")
+            else:
+                if signal_type == "BUY_CE" and not (float(close_5m) > float(vwap_5m)) and vwap_strict:
+                    failures.append("vwap_5m_not_bullish")
+                if signal_type == "BUY_PE" and not (float(close_5m) < float(vwap_5m)) and vwap_strict:
+                    failures.append("vwap_5m_not_bearish")
 
         ce_change = indicator.get("oi_change_ce")
         pe_change = indicator.get("oi_change_pe")
+        atm_oi_cfg = confirmation_cfg.get("atm_oi_shift", {}) if isinstance(confirmation_cfg.get("atm_oi_shift"), dict) else {}
+        atm_mode = str(atm_oi_cfg.get("mode", "hard")).lower()
         if ce_change is None or pe_change is None:
-            failures.append("missing_atm_oi_shift")
+            if atm_mode == "hard":
+                failures.append("missing_atm_oi_shift")
         else:
-            if signal_type == "BUY_CE" and not (float(ce_change) < 0 and float(pe_change) > 0):
+            if signal_type == "BUY_CE" and not (float(ce_change) < 0 and float(pe_change) > 0) and atm_mode == "hard":
                 failures.append("atm_oi_shift_invalid_for_ce")
-            if signal_type == "BUY_PE" and not (float(pe_change) < 0 and float(ce_change) > 0):
+            if signal_type == "BUY_PE" and not (float(pe_change) < 0 and float(ce_change) > 0) and atm_mode == "hard":
                 failures.append("atm_oi_shift_invalid_for_pe")
 
         futures_oi_change = indicator.get("futures_oi_change")
@@ -1062,7 +1071,8 @@ class OptionsRuntime:
                 failures.append("delta_below_min")
             if abs_delta > float(self._strict_cfg.get("delta_max_abs", 0.55)):
                 failures.append("delta_above_max")
-            if abs_delta < float(self._strict_cfg.get("delta_reject_below_abs", 0.30)):
+            reject_below_abs = self._strict_cfg.get("delta_reject_below_abs")
+            if reject_below_abs is not None and abs_delta < float(reject_below_abs):
                 failures.append("delta_rejected_below_floor")
 
         if self._is_major_event_day() and bool(self._strict_cfg.get("block_intraday_on_major_event", True)):
@@ -1077,13 +1087,15 @@ class OptionsRuntime:
             failures.append("market_closed")
 
         option_row = self._get_option_row(symbol, option_side)
-        min_volume = float(self._strict_cfg.get("min_option_volume", 1))
-        try:
-            volume = float(option_row.get("volume") or 0.0)
-            if volume < min_volume:
-                failures.append("liquidity_volume_too_low")
-        except Exception:
-            failures.append("liquidity_volume_missing")
+        min_volume_raw = self._strict_cfg.get("min_option_volume", 1)
+        if min_volume_raw is not None:
+            min_volume = float(min_volume_raw)
+            try:
+                volume = float(option_row.get("volume") or 0.0)
+                if volume < min_volume:
+                    failures.append("liquidity_volume_too_low")
+            except Exception:
+                failures.append("liquidity_volume_missing")
 
         anomaly = self._recent_anomaly(symbol)
         if anomaly:
@@ -1113,6 +1125,91 @@ class OptionsRuntime:
             return (sh, sm) <= now_hm <= (eh, em)
         except Exception:
             return False
+
+    @staticmethod
+    def _is_enabled(cfg: Dict[str, Any], key: str, default: bool = True) -> bool:
+        value = cfg.get(key, default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+    def _derive_signal_type(self, indicator: Dict[str, Any], force_direction: Optional[str]) -> tuple[Optional[str], Dict[str, int]]:
+        if force_direction in ("BUY_CE", "BUY_PE"):
+            return force_direction, {"BUY_CE": 0, "BUY_PE": 0}
+
+        logic_cfg = (self._strategy_cfg.get("signal", {}) or {}).get("directional_logic", {}) or {}
+        logic_type = str(logic_cfg.get("type", "legacy")).lower()
+        if logic_type != "consensus":
+            close_5m = indicator.get("close_5m")
+            vwap_5m = indicator.get("vwap_5m")
+            if close_5m is None or vwap_5m is None:
+                return None, {"BUY_CE": 0, "BUY_PE": 0}
+            if float(close_5m) > float(vwap_5m):
+                return "BUY_CE", {"BUY_CE": 1, "BUY_PE": 0}
+            if float(close_5m) < float(vwap_5m):
+                return "BUY_PE", {"BUY_CE": 0, "BUY_PE": 1}
+            return None, {"BUY_CE": 0, "BUY_PE": 0}
+
+        sources = logic_cfg.get(
+            "sources",
+            ["close_5m_vs_vwap_5m", "ema_15m_trend", "atm_oi_shift", "iv_direction"],
+        )
+        min_agree = int(logic_cfg.get("min_agree", 2))
+        votes = {"BUY_CE": 0, "BUY_PE": 0}
+
+        for source in sources:
+            src = str(source)
+            if src == "close_5m_vs_vwap_5m":
+                close_5m = indicator.get("close_5m")
+                vwap_5m = indicator.get("vwap_5m")
+                if close_5m is None or vwap_5m is None:
+                    continue
+                if float(close_5m) > float(vwap_5m):
+                    votes["BUY_CE"] += 1
+                elif float(close_5m) < float(vwap_5m):
+                    votes["BUY_PE"] += 1
+            elif src == "ema_15m_trend":
+                ema_15m = indicator.get("ema_15m")
+                close_now = indicator.get("close")
+                if ema_15m is None or close_now is None:
+                    continue
+                if float(close_now) >= float(ema_15m):
+                    votes["BUY_CE"] += 1
+                else:
+                    votes["BUY_PE"] += 1
+            elif src == "atm_oi_shift":
+                ce_change = indicator.get("oi_change_ce")
+                pe_change = indicator.get("oi_change_pe")
+                if ce_change is None or pe_change is None:
+                    continue
+                if float(ce_change) < 0 and float(pe_change) > 0:
+                    votes["BUY_CE"] += 1
+                if float(pe_change) < 0 and float(ce_change) > 0:
+                    votes["BUY_PE"] += 1
+            elif src == "iv_direction":
+                iv_change = indicator.get("iv_change")
+                if iv_change is None:
+                    continue
+                # Rising IV supports long premium on either side.
+                if float(iv_change) >= 0:
+                    votes["BUY_CE"] += 1
+                    votes["BUY_PE"] += 1
+
+        if votes["BUY_CE"] < min_agree and votes["BUY_PE"] < min_agree:
+            return None, votes
+        if votes["BUY_CE"] > votes["BUY_PE"]:
+            return "BUY_CE", votes
+        if votes["BUY_PE"] > votes["BUY_CE"]:
+            return "BUY_PE", votes
+
+        close_5m = indicator.get("close_5m")
+        vwap_5m = indicator.get("vwap_5m")
+        if close_5m is not None and vwap_5m is not None:
+            if float(close_5m) > float(vwap_5m):
+                return "BUY_CE", votes
+            if float(close_5m) < float(vwap_5m):
+                return "BUY_PE", votes
+        return None, votes
 
     def _effective_project_min_score(self, score_cfg: Dict[str, Any], indicator: Dict[str, Any]) -> int:
         base = int(score_cfg.get("min_score", 70))
@@ -1144,17 +1241,7 @@ class OptionsRuntime:
             return None
 
         # Determine Technical Bias
-        signal_type = None
-        close_5m = indicator.get("close_5m")
-        vwap_5m = indicator.get("vwap_5m")
-        if close_5m is not None and vwap_5m is not None:
-            if float(close_5m) > float(vwap_5m):
-                signal_type = "BUY_CE"
-            elif float(close_5m) < float(vwap_5m):
-                signal_type = "BUY_PE"
-        
-        if force_direction in ("BUY_CE", "BUY_PE"):
-            signal_type = force_direction
+        signal_type, directional_votes = self._derive_signal_type(indicator, force_direction)
 
         if not signal_type:
             return None
@@ -1194,9 +1281,12 @@ class OptionsRuntime:
             return None
 
         # 5. Adaptive OI ratio
+        confirmation_cfg = (self._project_cfg.get("confirmation", {}) if isinstance(self._project_cfg, dict) else {}) or {}
+        atm_oi_cfg = confirmation_cfg.get("atm_oi_shift", {}) if isinstance(confirmation_cfg.get("atm_oi_shift"), dict) else {}
+        oi_ratio_mode = str(atm_oi_cfg.get("mode", "hard")).lower()
         ce_change = abs(float(indicator.get("oi_change_ce") or 0.0))
         pe_change = abs(float(indicator.get("oi_change_pe") or 0.0))
-        if force_direction is None:
+        if force_direction is None and oi_ratio_mode != "score":
             if signal_type == "BUY_CE":
                 oi_ratio = pe_change / ce_change if ce_change > 0 else 10.0
                 if oi_ratio < 1.5:
@@ -1249,6 +1339,7 @@ class OptionsRuntime:
             "symbol": symbol,
             "signal": signal_type,
             "ts": indicator.get("ts"),
+            "directional_votes": directional_votes,
             "entry": round(entry, 2),
             "stop_loss": round(sl_abs, 2),
             "target": round(target_abs, 2),
